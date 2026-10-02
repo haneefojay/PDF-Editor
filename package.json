@@ -1,0 +1,17 @@
+{
+  "name": "paperless-pdf-editor",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "packageManager": "pnpm@10.17.1",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "lint": "turbo lint",
+    "typecheck": "turbo typecheck",
+    "test": "turbo test",
+    "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build"
+  },
+  "devDependencies": { "prettier": "^3.6.2", "turbo": "^2.5.8", "typescript": "^5.9.2" }
+}
