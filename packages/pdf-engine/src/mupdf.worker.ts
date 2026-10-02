@@ -1,10 +1,23 @@
 /// <reference lib="webworker" />
 import * as Comlink from "comlink";
-import * as mupdf from "mupdf";
 import type { PdfWorkerApi } from "./protocol";
+import type * as Mupdf from "mupdf";
+
+// MuPDF's generated loader can stall while resolving its WASM URL from a
+// module worker. Supplying the binary explicitly keeps initialization
+// deterministic across Vite dev and production builds.
+import wasmUrl from "../node_modules/mupdf/dist/mupdf-wasm.wasm?url";
+const wasmBinary = new Uint8Array(await (await fetch(wasmUrl)).arrayBuffer());
+const workerGlobal = globalThis as unknown as {
+  process?: unknown;
+  $libmupdf_wasm_Module?: { wasmBinary: Uint8Array };
+};
+workerGlobal.process = undefined;
+workerGlobal.$libmupdf_wasm_Module = { wasmBinary };
+const mupdf = await import("mupdf");
 
 class Engine implements PdfWorkerApi{
- private doc:mupdf.Document|null=null;
+ private doc:Mupdf.Document|null=null;
  async loadDocument(bytes:ArrayBuffer){
   this.doc?.destroy();
   this.doc=mupdf.Document.openDocument(bytes,"application/pdf");
@@ -22,3 +35,4 @@ class Engine implements PdfWorkerApi{
  async destroy(){this.doc?.destroy();this.doc=null}
 }
 Comlink.expose(new Engine());
+postMessage({ type: "PDF_ENGINE_READY" });

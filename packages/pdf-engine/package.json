@@ -1,6 +1,25 @@
 {
-  "name":"@paperless/pdf-engine","version":"0.1.0","private":true,"type":"module","license":"AGPL-3.0-only",
-  "exports":{".":"./src/client.ts","./worker":"./src/mupdf.worker.ts"},
-  "scripts":{"build":"tsc -p tsconfig.json","lint":"tsc -p tsconfig.json","typecheck":"tsc -p tsconfig.json","test":"vitest run --passWithNoTests"},
-  "dependencies":{"comlink":"^4.4.2","mupdf":"1.28.1"},"devDependencies":{"vitest":"^3.2.4","typescript":"^5.9.2"}
+  "name": "@paperless/pdf-engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "AGPL-3.0-only",
+  "exports": {
+    ".": "./src/client.ts",
+    "./worker": "./src/mupdf.worker.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "comlink": "^4.4.2",
+    "mupdf": "1.28.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
 }
