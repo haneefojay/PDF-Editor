@@ -1,17 +1,29 @@
 export type PageInfo = { width: number; height: number };
+export type NormalizedRect = { x: number; y: number; width: number; height: number };
+export type PdfMetadata = { title: string; author: string; subject: string; keywords: string };
+export type FormField = { page: number; name: string; label: string; type: "text" | "choice" | "checkbox" | "radio"; value: string; options: string[]; readOnly: boolean };
 
 export type ExportOverlay =
   | { id: string; page: number; kind: "text"; x: number; y: number; text: string; size: number; color: string }
-  | { id: string; page: number; kind: "ink"; points: { x: number; y: number }[]; color: string; width: number }
-  | { id: string; page: number; kind: "rect" | "redact"; x: number; y: number; width: number; height: number; color: string };
+  | { id: string; page: number; kind: "ink" | "signature"; points: { x: number; y: number }[]; color: string; width: number }
+  | { id: string; page: number; kind: "rect" | "redact"; x: number; y: number; width: number; height: number; color: string }
+  | { id: string; page: number; kind: "image"; x: number; y: number; width: number; height: number; dataUrl: string };
 
-export type ExportRequest = { overlays: ExportOverlay[]; rotations: Record<number, number>; pageOrder: number[] };
+export type ExportRequest = {
+  overlays: ExportOverlay[];
+  rotations: Record<number, number>;
+  pageOrder: number[];
+  crops: Record<number, NormalizedRect>;
+  metadata: PdfMetadata;
+  formValues: Record<string, string>;
+};
 export type ExportResult = { bytes: Uint8Array; pageCount: number; annotationCount: number; redactionCount: number };
 
 export interface PdfWorkerApi {
-  loadDocument(bytes: ArrayBuffer): Promise<{ pageCount: number; pages: PageInfo[] }>;
+  loadDocument(bytes: ArrayBuffer): Promise<{ pageCount: number; pages: PageInfo[]; metadata: PdfMetadata; formFields: FormField[]; encrypted: boolean }>;
   renderPage(index: number, scale: number): Promise<Uint8Array>;
   extractText(index: number): Promise<string>;
   exportDocument(request: ExportRequest): Promise<ExportResult>;
+  mergeDocument(bytes: ArrayBuffer, request: ExportRequest): Promise<{ bytes: Uint8Array; pageCount: number }>;
   destroy(): Promise<void>;
 }

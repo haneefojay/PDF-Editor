@@ -20,6 +20,13 @@ describe("commands", () => {
     expect(applyCommand(moved, inverseCommand(command)).pageOrder).toEqual([0, 1, 2]);
   });
 
+  it("applies and reverses crop", () => {
+    const command: Command = { type: "setCrop", page: 0, before: null, after: { x: 0.1, y: 0.1, width: 0.8, height: 0.8 } };
+    const cropped = applyCommand(emptyDocument(1), command);
+    expect(cropped.crops[0]?.width).toBe(0.8);
+    expect(applyCommand(cropped, inverseCommand(command)).crops[0]).toBeUndefined();
+  });
+
   it("rejects corrupt persisted snapshots", () => {
     expect(() => EditorDocumentSchema.parse({ schemaVersion: 1, overlays: [], rotations: {}, pageOrder: [0, -1] })).toThrow();
   });

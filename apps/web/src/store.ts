@@ -14,7 +14,7 @@ type Store = {
   execute: (command: Command) => void;
   undoOnce: () => void;
   redoOnce: () => void;
-  reset: (pageCount: number) => void;
+  reset: (pageCount: number, seed?: Partial<EditorDocument>) => void;
   hydrate: (snapshot: EditorDocument) => void;
 };
 
@@ -41,6 +41,6 @@ export const useEditor = create<Store>((set, get) => ({
     if (!command) return;
     set({ doc: applyCommand(state.doc, command), undo: [...state.undo, command], redo: state.redo.slice(1) });
   },
-  reset: (pageCount) => set({ tool: "select", page: 0, doc: emptyDocument(pageCount), undo: [], redo: [] }),
+  reset: (pageCount, seed) => set({ tool: "select", page: 0, doc: { ...emptyDocument(pageCount), ...seed }, undo: [], redo: [] }),
   hydrate: (snapshot) => set({ tool: "select", page: 0, doc: EditorDocumentSchema.parse(snapshot), undo: [], redo: [] }),
 }));

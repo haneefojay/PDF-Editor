@@ -20,9 +20,16 @@
 
 Crop, merge, and split move to Phase 3 alongside deeper document editing.
 
-## Phase 3 — editing depth
-- Existing text replacement with explicit limitations
-- Images, annotations, forms, signatures, metadata, encrypted PDFs
+## Phase 3 — document editing depth (complete)
+- Place PNG/JPEG images and bake them into page content
+- Draw visual signatures and persist annotation appearance
+- Set CropBox regions with undoable normalized geometry
+- Inspect and fill text, choice, checkbox, and radio form fields
+- Read and edit title, author, subject, and keywords metadata
+- Merge another unlocked PDF and split the current page
+- Independently validate all resulting PDFs
+
+Existing-text replacement and password entry remain explicitly deferred until they can meet the same integrity bar.
 
 ## Phase 4 — Android and hardening
 - Capacitor Android file workflows and signed APK pipeline

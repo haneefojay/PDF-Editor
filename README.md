@@ -9,12 +9,13 @@ A local-first, privacy-first PDF editor for the web, licensed under AGPL-3.0. PD
 - Page rail, keyboard navigation, zoom, persisted rotation, reorder, and delete
 - Command-based overlay editing for text, freehand ink, rectangles, and redactions
 - Undo/redo with deterministic command history
-- Validated edited-PDF export for text, ink, rectangles, destructive redactions, and page rotation
+- Validated edited-PDF export for text, ink, signatures, images, rectangles, destructive redactions, crop, forms, metadata, and page rotation
 - Every export is reopened and rendered before download; repeat exports clone the source document
+- Merge PDFs and split the current page without a backend
 - OPFS-first autosave with IndexedDB fallback, recent projects, and reload recovery
 - Responsive desktop/mobile shell and offline app manifest
 
-> This is an honest early vertical slice, not a finished release. Android packaging, forms, signatures, merge/split, crop, and the full regression corpus remain on the roadmap.
+> This is an honest early vertical slice, not a finished release. Android packaging, existing-text replacement, encrypted-PDF password entry, advanced annotation types, and the full regression corpus remain on the roadmap.
 
 ## Development
 
