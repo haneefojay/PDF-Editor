@@ -12,6 +12,11 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
+    "@capacitor/app": "^7.1.2",
+    "@capacitor/core": "^7.6.9",
+    "@capacitor/filesystem": "^7.1.9",
+    "@capacitor/share": "^7.0.4",
+    "@capacitor/status-bar": "^7.0.6",
     "@paperless/editor-core": "workspace:*",
     "@paperless/pdf-engine": "workspace:*",
     "dexie": "^4.4.6",

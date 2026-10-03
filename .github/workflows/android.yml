@@ -1,0 +1,39 @@
+name: Android APK
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "apps/web/**"
+      - "packages/**"
+      - "capacitor.config.ts"
+      - "scripts/prepare-android.mjs"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - ".github/workflows/android.yml"
+
+jobs:
+  debug-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 10.17.1 }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
+      - run: pnpm android:prepare
+      - run: chmod +x android/gradlew && cd android && ./gradlew assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: paperless-pdf-editor-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error

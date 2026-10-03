@@ -31,8 +31,13 @@ Crop, merge, and split move to Phase 3 alongside deeper document editing.
 
 Existing-text replacement and password entry remain explicitly deferred until they can meet the same integrity bar.
 
-## Phase 4 — Android and hardening
-- Capacitor Android file workflows and signed APK pipeline
-- Compatibility corpus, visual regression, accessibility and security audits
+## Phase 4 — Android and platform hardening (complete)
+- Reproducible Capacitor Android project generation and verified debug APK
+- System file chooser plus native save/share sheet with no broad storage permission
+- Android back-button navigation, status/navigation bar integration, safe areas, and 44px touch targets
+- Offline fonts/assets, disabled Android backup, and blocked cleartext traffic
+- GitHub Actions APK artifact pipeline
+
+Release signing remains operator-controlled: production keystores must be provided through repository secrets.
 
 A feature ships only when it performs the promised PDF operation and survives export validation.

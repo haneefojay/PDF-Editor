@@ -8,3 +8,6 @@ coverage
 !.env.example
 android/.gradle
 android/app/build
+
+# Generated Capacitor Android project
+/android/

@@ -13,9 +13,13 @@
     "lint": "turbo lint",
     "typecheck": "turbo typecheck",
     "test": "turbo test",
-    "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build"
+    "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build",
+    "android:prepare": "pnpm build && node scripts/prepare-android.mjs",
+    "android:apk": "pnpm android:prepare && cd android && ./gradlew assembleDebug"
   },
   "devDependencies": {
+    "@capacitor/android": "^7.6.9",
+    "@capacitor/cli": "^7.6.9",
     "@playwright/test": "^1.63.0",
     "prettier": "^3.6.2",
     "turbo": "^2.5.8",

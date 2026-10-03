@@ -13,7 +13,7 @@ A local-first, privacy-first PDF editor for the web, licensed under AGPL-3.0. PD
 - Every export is reopened and rendered before download; repeat exports clone the source document
 - Merge PDFs and split the current page without a backend
 - OPFS-first autosave with IndexedDB fallback, recent projects, and reload recovery
-- Responsive desktop/mobile shell and offline app manifest
+- Responsive desktop/mobile shell, offline app manifest, and reproducible Android APK
 
 > This is an honest early vertical slice, not a finished release. Android packaging, existing-text replacement, encrypted-PDF password entry, advanced annotation types, and the full regression corpus remain on the roadmap.
 
@@ -37,3 +37,16 @@ Open `http://localhost:5173`. The first MuPDF load may take a moment while WebAs
 - `docs/adr`: architecture decisions
 
 See [ROADMAP.md](ROADMAP.md), [SECURITY.md](SECURITY.md), and [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Android
+
+The native project is generated from committed source so Capacitor build output and binary Gradle assets do not need to be versioned.
+
+```bash
+pnpm android:prepare   # build web assets, generate/sync android/
+pnpm android:apk       # also create a debug APK
+```
+
+The debug APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`. GitHub Actions runs the same build and uploads `paperless-pdf-editor-debug-apk` as an artifact. Release signing requires a private keystore supplied through CI secrets; no signing keys belong in this repository.
+
+On Android, PDFs are selected through the system file chooser. Validated exports are written to the app cache and handed to Android's system save/share sheet. No broad storage permission is requested.

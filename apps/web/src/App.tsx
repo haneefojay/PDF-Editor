@@ -4,6 +4,7 @@ import { createPdfEngine, type FormField, type PageInfo, type PdfMetadata } from
 import { EditorDocumentSchema, normalizeRect, type EditorDocument, type Overlay, type Tool } from "@paperless/editor-core";
 import { deleteProject, listProjects, loadProject, saveProject, type ProjectSummary } from "./persistence";
 import { useEditor } from "./store";
+import { configureNativeUi, registerBackHandler, savePdf } from "./platform";
 
 const tools: { id: Tool; label: string; Icon: typeof MousePointer2 }[] = [
   { id: "select", label: "Select", Icon: MousePointer2 },
@@ -38,6 +39,7 @@ export function App() {
 
   useEffect(() => {
     engine.current = createPdfEngine();
+    void configureNativeUi();
     void refreshRecent();
     return () => engine.current?.terminate();
   }, [refreshRecent]);
@@ -171,6 +173,17 @@ export function App() {
     void refreshRecent();
   };
 
+  useEffect(() => {
+    let dispose = () => undefined;
+    void registerBackHandler(() => {
+      if (showProperties) { setShowProperties(false); return true; }
+      if (showForms) { setShowForms(false); return true; }
+      if (open) { open.urls.forEach((url) => URL.revokeObjectURL(url)); setOpen(null); setImage(null); void refreshRecent(); return true; }
+      return false;
+    }).then((cleanup) => { dispose = cleanup; });
+    return () => dispose();
+  }, [open, refreshRecent, showForms, showProperties]);
+
   const download = async () => {
     if (!open) return;
     setError("");
@@ -189,12 +202,8 @@ export function App() {
         filename = `${open.name.replace(/\.pdf$/i, "")}-edited.pdf`;
         setNotice(`Export verified: ${result.pageCount} pages, ${result.annotationCount} edits, ${result.redactionCount} redactions.`);
       }
-      const url = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = filename;
-      anchor.click();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      const message = await savePdf(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes), filename);
+      setNotice((current) => current ? `${current} ${message}.` : message);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "PDF export failed validation.");
     } finally {
@@ -203,7 +212,7 @@ export function App() {
   };
 
   const exportRequest = { overlays: doc.overlays, rotations: doc.rotations, pageOrder: doc.pageOrder, crops: doc.crops, metadata: doc.metadata, formValues: doc.formValues };
-  const downloadBytes = (bytes: Uint8Array, filename: string) => { const copy = new Uint8Array(bytes.byteLength); copy.set(bytes); const url = URL.createObjectURL(new Blob([copy.buffer], { type: "application/pdf" })); const anchor = document.createElement("a"); anchor.href = url; anchor.download = filename; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); };
+  const downloadBytes = (bytes: Uint8Array, filename: string) => savePdf(bytes, filename);
 
   const addImage = async (file: File) => {
     if (!open || !file.type.startsWith("image/")) { setError("Choose a PNG or JPEG image."); return; }
@@ -224,7 +233,7 @@ export function App() {
   const splitCurrentPage = async () => {
     if (!open) return;
     setExporting(true); setError("");
-    try { const result = await engine.current!.api.exportDocument({ ...exportRequest, pageOrder: [sourcePage] }); downloadBytes(result.bytes, `${open.name.replace(/\.pdf$/i, "")}-page-${page + 1}.pdf`); setNotice("Current page exported and verified."); }
+    try { const result = await engine.current!.api.exportDocument({ ...exportRequest, pageOrder: [sourcePage] }); const message = await downloadBytes(result.bytes, `${open.name.replace(/\.pdf$/i, "")}-page-${page + 1}.pdf`); setNotice(`Current page exported and verified. ${message}.`); }
     catch (cause) { setError(cause instanceof Error ? cause.message : "Page split failed."); }
     finally { setExporting(false); }
   };
