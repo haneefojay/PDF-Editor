@@ -59,10 +59,10 @@ Sources:
 
 ### Phase D — Page, image, and layout tools
 
-- [ ] Replace/extract images, opacity, rotation, crop, arrange, and alignment guides.
-- [ ] Insert blank pages and pages from files; duplicate, extract, and batch reorder.
-- [ ] Headers, footers, Bates numbering, backgrounds, and watermarks.
-- [ ] Compression with previewable quality profiles and file-size estimates.
+- [x] Replace/extract images, opacity, rotation, crop, arrange, and alignment guides.
+- [x] Insert blank pages and pages from files; duplicate, extract, and batch reorder.
+- [x] Headers, footers, Bates numbering, backgrounds, and watermarks.
+- [x] Compression with previewable quality profiles and file-size estimates.
 
 ### Phase E — Forms, signatures, and security
 

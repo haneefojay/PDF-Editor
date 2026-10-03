@@ -55,6 +55,16 @@ describe("commands", () => {
     expect(parsed.overlays[0]).toMatchObject({ kind: "markup", author: "QA", flatten: true });
   });
 
+  it("reorders layered objects as one undoable command", () => {
+    const first = { id: "first", page: 0, kind: "image", x: 0.1, y: 0.1, width: 0.2, height: 0.2, dataUrl: "data:image/png;base64,AA==", opacity: 1, rotation: 0 } as const;
+    const second = { id: "second", page: 0, kind: "background", color: "#ffffff", opacity: 1 } as const;
+    const before = [first, second];
+    const command: Command = { type: "setOverlayOrder", before, after: [second, first] };
+    const seeded = { ...emptyDocument(1), overlays: [...before] };
+    expect(applyCommand(seeded, command).overlays.map((item) => item.id)).toEqual(["second", "first"]);
+    expect(applyCommand(applyCommand(seeded, command), inverseCommand(command)).overlays.map((item) => item.id)).toEqual(["first", "second"]);
+  });
+
   it("rejects corrupt persisted snapshots", () => {
     expect(() => EditorDocumentSchema.parse({ schemaVersion: 1, overlays: [], rotations: {}, pageOrder: [0, -1] })).toThrow();
   });

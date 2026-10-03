@@ -29,6 +29,9 @@ export const Overlay = z.discriminatedUnion("kind", [
     invisible: z.boolean().optional(),
     ocrConfidence: z.number().min(0).max(100).optional(),
     ocrSource: z.boolean().optional(),
+    opacity: z.number().min(0.05).max(1).optional(),
+    rotation: z.number().optional(),
+    layoutRole: z.enum(["header", "footer", "watermark", "bates"]).optional(),
   }),
   z.object({ id: z.string(), page: z.number().int().nonnegative(), kind: z.literal("ink"), points: z.array(Point).min(2), color: z.string(), width: z.number().positive() }),
   z.object({ id: z.string(), page: z.number().int().nonnegative(), kind: z.literal("signature"), points: z.array(Point).min(2), color: z.string(), width: z.number().positive() }),
@@ -41,7 +44,8 @@ export const Overlay = z.discriminatedUnion("kind", [
   // Kept for projects saved by versions before the Shapes tool.
   z.object({ id: z.string(), page: z.number().int().nonnegative(), kind: z.literal("rect"), x: z.number(), y: z.number(), width: z.number().nonnegative(), height: z.number().nonnegative(), color: z.string() }),
   z.object({ id: z.string(), page: z.number().int().nonnegative(), kind: z.literal("redact"), x: z.number(), y: z.number(), width: z.number().nonnegative(), height: z.number().nonnegative(), color: z.string() }),
-  z.object({ id: z.string(), page: z.number().int().nonnegative(), kind: z.literal("image"), x: z.number(), y: z.number(), width: z.number().positive(), height: z.number().positive(), dataUrl: z.string().startsWith("data:image/") }),
+  z.object({ id: z.string(), page: z.number().int().nonnegative(), kind: z.literal("image"), x: z.number(), y: z.number(), width: z.number().positive(), height: z.number().positive(), dataUrl: z.string().startsWith("data:image/"), name: z.string().optional(), opacity: z.number().min(0.05).max(1).default(1), rotation: z.number().default(0) }),
+  z.object({ id: z.string(), page: z.number().int().nonnegative(), kind: z.literal("background"), color: z.string(), opacity: z.number().min(0).max(1).default(1) }),
   z.object({ id: z.string(), page: z.number().int().nonnegative(), kind: z.literal("markup"), markup: z.enum(["highlight", "underline", "strikeout", "squiggly"]), x: z.number(), y: z.number(), width: z.number().positive(), height: z.number().positive(), color: z.string(), opacity: z.number().min(0.05).max(1).default(0.35), ...ReviewMetadata }),
   z.object({ id: z.string(), page: z.number().int().nonnegative(), kind: z.literal("note"), noteType: z.enum(["sticky", "callout"]), x: z.number(), y: z.number(), width: z.number().positive(), height: z.number().positive(), color: z.string(), text: z.string(), ...ReviewMetadata }),
   z.object({ id: z.string(), page: z.number().int().nonnegative(), kind: z.literal("stamp"), x: z.number(), y: z.number(), width: z.number().positive(), height: z.number().positive(), label: z.string(), color: z.string(), ...ReviewMetadata }),
@@ -68,6 +72,7 @@ export type Command =
   | { type: "remove"; overlay: Overlay }
   | { type: "removeMany"; overlays: Overlay[] }
   | { type: "updateOverlay"; before: Overlay; after: Overlay }
+  | { type: "setOverlayOrder"; before: Overlay[]; after: Overlay[] }
   | { type: "rotate"; page: number; before: number; after: number }
   | { type: "setPageOrder"; before: number[]; after: number[] }
   | { type: "setCrop"; page: number; before: NormalizedRect | null; after: NormalizedRect | null }
@@ -97,6 +102,7 @@ export function applyCommand(state: EditorDocument, command: Command): EditorDoc
       const index = draft.overlays.findIndex((item) => item.id === command.before.id);
       if (index >= 0) draft.overlays[index] = command.after;
     }
+    if (command.type === "setOverlayOrder") draft.overlays = [...command.after];
     if (command.type === "rotate") draft.rotations[command.page] = ((command.after % 360) + 360) % 360;
     if (command.type === "setPageOrder") draft.pageOrder = [...command.after];
     if (command.type === "setCrop") { if (command.after) draft.crops[command.page] = command.after; else delete draft.crops[command.page]; }
@@ -111,6 +117,7 @@ export function inverseCommand(command: Command): Command {
   if (command.type === "remove") return { type: "add", overlay: command.overlay };
   if (command.type === "removeMany") return { type: "addMany", overlays: command.overlays };
   if (command.type === "updateOverlay") return { ...command, before: command.after, after: command.before };
+  if (command.type === "setOverlayOrder") return { ...command, before: command.after, after: command.before };
   if (command.type === "rotate") return { ...command, before: command.after, after: command.before };
   if (command.type === "setPageOrder") return { ...command, before: command.after, after: command.before };
   if (command.type === "setCrop") return { ...command, before: command.after, after: command.before };

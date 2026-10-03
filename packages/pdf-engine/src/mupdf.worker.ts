@@ -55,6 +55,13 @@ const appendPageCommands = (doc: Mupdf.PDFDocument, page: Mupdf.PDFPage, command
   else if (contents.resolve().isArray()) contents.resolve().push(stream);
   else { const array = doc.newArray(); array.push(contents); array.push(stream); pageObject.put("Contents", array); }
 };
+const prependPageCommands = (doc: Mupdf.PDFDocument, page: Mupdf.PDFPage, commands: string[]) => {
+  const pageObject = page.getObject(); const stream = doc.addStream(new TextEncoder().encode(["q", ...commands, "Q"].join("\n")), doc.newDictionary()); const contents = pageObject.get("Contents");
+  if (contents.isNull()) pageObject.put("Contents", stream);
+  else if (contents.resolve().isArray()) {
+    const original = contents.resolve(); const array = doc.newArray(); array.push(stream); for (let index = 0; index < original.length; index += 1) array.push(original.get(index)); pageObject.put("Contents", array);
+  } else { const array = doc.newArray(); array.push(stream); array.push(contents); pageObject.put("Contents", array); }
+};
 const reviewMetadata = (annotation: Mupdf.PDFAnnotation, overlay: { id: string; author: string; createdAt: string; comment: string; resolved: boolean }) => {
   annotation.setName(overlay.id);
   annotation.setAuthor(overlay.author || "Paperless");
@@ -134,7 +141,8 @@ const appendTextContent = async (doc: Mupdf.PDFDocument, page: Mupdf.PDFPage, ov
   let fonts = resources.get("Font");
   if (fonts.isNull()) { fonts = doc.newDictionary(); resources.put("Font", fonts); }
   fonts.resolve().put(resourceName, fontReference);
-  const [red, green, blue] = toColor(overlay.color) as [number, number, number];
+  const sourceColor = toColor(overlay.color) as [number, number, number]; const opacity = overlay.opacity ?? 1;
+  const [red, green, blue] = sourceColor.map((value) => 1 - (1 - value) * opacity) as [number, number, number];
   const boxX = bounds[0] + overlay.x * width; const boxWidth = overlay.width * width; const top = bounds[1] + overlay.y * height;
   const widthFactor = category === "mono" ? 0.62 : category === "serif" ? 0.52 : 0.56; const factor = widthFactor + (overlay.bold ? 0.03 : 0);
   const longestSourceLine = Math.max(...overlay.text.split(/\r?\n/).map((line) => line.length), 1);
@@ -160,7 +168,8 @@ const appendTextContent = async (doc: Mupdf.PDFDocument, page: Mupdf.PDFPage, ov
     const x = overlay.alignment === "center" ? boxX + Math.max(0, (boxWidth - lineWidth) / 2) : overlay.alignment === "right" ? boxX + Math.max(0, boxWidth - lineWidth) : boxX;
     const y = bounds[3] - top - effectiveSize - index * effectiveSize * overlay.lineHeight;
     const spaces = (line.match(/ /g) ?? []).length; const justifySpacing = overlay.alignment === "justify" && index < lines.length - 1 && spaces > 0 ? Math.max(0, (boxWidth - lineWidth) / spaces) : 0;
-    commands.push(`${justifySpacing} Tw`, `1 0 0 1 ${x} ${y} Tm`, `<${hex}> Tj`);
+    const radians = ((overlay.rotation ?? 0) * Math.PI) / 180; const cosine = Math.cos(radians); const sine = Math.sin(radians);
+    commands.push(`${justifySpacing} Tw`, `${cosine} ${sine} ${-sine} ${cosine} ${x} ${y} Tm`, `<${hex}> Tj`);
     if (overlay.underline) commands.push("ET", `${Math.max(0.7, effectiveSize / 14)} w`, `${x} ${y - 2} m ${x + Math.min(boxWidth, lineWidth + justifySpacing * spaces)} ${y - 2} l S`, "BT", `/${resourceName} ${effectiveSize} Tf`, `${overlay.letterSpacing} Tc`, `${red} ${green} ${blue} rg`);
   });
   commands.push("ET", "Q");
@@ -249,6 +258,16 @@ class Engine implements PdfWorkerApi {
     structured.destroy(); page.destroy(); return lines;
   }
 
+  async extractPageImages(index: number) {
+    if (!this.doc) throw new Error("No PDF is open");
+    const page = this.doc.loadPage(index); const bounds = page.getBounds(); const width = bounds[2] - bounds[0]; const height = bounds[3] - bounds[1]; const structured = page.toStructuredText("preserve-images"); const images: import("./protocol").PageImage[] = []; let imageIndex = 0;
+    structured.walk({ onImageBlock: (bbox, _transform, image) => {
+      const pixmap = image.toPixmap(); const png = new Uint8Array(pixmap.asPNG()); const binary = Array.from(png, (byte) => String.fromCharCode(byte)).join("");
+      images.push({ id: `${index}-${imageIndex++}`, x: (bbox[0] - bounds[0]) / width, y: (bbox[1] - bounds[1]) / height, width: (bbox[2] - bbox[0]) / width, height: (bbox[3] - bbox[1]) / height, pixelWidth: image.getWidth(), pixelHeight: image.getHeight(), dataUrl: `data:image/png;base64,${btoa(binary)}` }); pixmap.destroy();
+    } });
+    structured.destroy(); page.destroy(); return images;
+  }
+
   async exportDocument(request: ExportRequest) {
     if (!this.doc || !this.sourceBytes) throw new Error("No PDF is open");
     const opened = mupdf.Document.openDocument(this.sourceBytes, "application/pdf");
@@ -293,7 +312,10 @@ class Engine implements PdfWorkerApi {
     for (const overlay of request.overlays) {
       if (overlay.page < 0 || overlay.page >= doc.countPages()) continue;
       const page = doc.loadPage(overlay.page); const bounds = page.getBounds();
-      if ("flatten" in overlay && overlay.flatten && overlay.kind !== "attachment") {
+      if (overlay.kind === "background") {
+        const source = toColor(overlay.color) as [number, number, number]; const blended = source.map((value) => 1 - (1 - value) * overlay.opacity);
+        prependPageCommands(doc, page, [`${blended[0]} ${blended[1]} ${blended[2]} rg`, `${bounds[0]} ${bounds[1]} ${bounds[2] - bounds[0]} ${bounds[3] - bounds[1]} re f`]); annotationCount += 1;
+      } else if ("flatten" in overlay && overlay.flatten && overlay.kind !== "attachment") {
         await flattenedReview(doc, page, overlay, `PEF${annotationCount + 1}`); annotationCount += 1;
       } else if (overlay.kind === "text") {
         textOverlays.push(overlay);
@@ -308,7 +330,7 @@ class Engine implements PdfWorkerApi {
         else annotation.setRect(box);
         annotation.setColor(toColor(overlay.color)); if (overlay.fillColor) annotation.setInteriorColor(toColor(overlay.fillColor)); annotation.setBorderWidth(overlay.strokeWidth); annotation.setFlags(mupdf.PDFAnnotation.IS_PRINT); annotation.update(); annotation.destroy(); annotationCount += 1;
       } else if (overlay.kind === "image") {
-        const image = new mupdf.Image(dataUrlBytes(overlay.dataUrl)); const annotation = page.createAnnotation("Stamp"); annotation.setRect(normalizedRect(overlay, bounds)); annotation.setStampImage(image); annotation.setFlags(mupdf.PDFAnnotation.IS_PRINT); annotation.update(); annotation.destroy(); image.destroy(); annotationCount += 1;
+        const image = new mupdf.Image(dataUrlBytes(overlay.dataUrl)); const annotation = page.createAnnotation("Stamp"); annotation.setRect(normalizedRect(overlay, bounds)); annotation.setStampImage(image); annotation.setOpacity(overlay.opacity); annotation.getObject().put("Rotate", ((overlay.rotation % 360) + 360) % 360); annotation.setFlags(mupdf.PDFAnnotation.IS_PRINT); annotation.update(); annotation.destroy(); image.destroy(); annotationCount += 1;
       } else if (overlay.kind === "markup") {
         const type = overlay.markup === "highlight" ? "Highlight" : overlay.markup === "underline" ? "Underline" : overlay.markup === "strikeout" ? "StrikeOut" : "Squiggly";
         const annotation = page.createAnnotation(type); const rect = normalizedRect(overlay, bounds);
@@ -348,7 +370,8 @@ class Engine implements PdfWorkerApi {
     const uniquePages = new Set(request.pageOrder);
     if (request.pageOrder.length === 0 || uniquePages.size !== request.pageOrder.length || request.pageOrder.some((page) => page < 0 || page >= doc.countPages())) { doc.destroy(); throw new Error("Export validation failed: page order is invalid."); }
     doc.rearrangePages(request.pageOrder);
-    const saved = doc.saveToBuffer("garbage=4,compress=yes,clean=yes").asUint8Array(); const bytes = new Uint8Array(saved.length); bytes.set(saved);
+    const saveOptions = request.compression === "original" ? "garbage=2,compress=no" : request.compression === "small" ? "garbage=4,compress=yes,compress-images=yes,compress-fonts=yes,clean=yes" : "garbage=4,compress=yes,clean=yes";
+    const saved = doc.saveToBuffer(saveOptions).asUint8Array(); const bytes = new Uint8Array(saved.length); bytes.set(saved);
     const verified = mupdf.Document.openDocument(bytes, "application/pdf");
     if (!verified.isPDF() || verified.countPages() !== request.pageOrder.length) { verified.destroy(); doc.destroy(); throw new Error("Export validation failed: page structure changed unexpectedly."); }
     if (verified.countPages() > 0) { const first = verified.loadPage(0); const pixmap = first.toPixmap([0.25, 0, 0, 0.25, 0, 0], mupdf.ColorSpace.DeviceRGB, false, true); pixmap.destroy(); first.destroy(); }
@@ -363,6 +386,27 @@ class Engine implements PdfWorkerApi {
     const target = targetOpened as Mupdf.PDFDocument; const source = sourceOpened as Mupdf.PDFDocument;
     for (let index = 0; index < source.countPages(); index += 1) target.graftPage(-1, source, index);
     const saved = target.saveToBuffer("garbage=4,compress=yes,clean=yes").asUint8Array(); const output = new Uint8Array(saved.length); output.set(saved); const pageCount = target.countPages(); target.destroy(); source.destroy(); return { bytes: output, pageCount };
+  }
+
+  async composeDocument(request: ExportRequest, operation: { type: "blank"; at: number; width: number; height: number } | { type: "duplicate"; at: number; source: number } | { type: "insert"; at: number; bytes: ArrayBuffer }) {
+    const current = await this.exportDocument(request); const opened = mupdf.Document.openDocument(current.bytes, "application/pdf");
+    if (!opened.isPDF()) { opened.destroy(); throw new Error("The current PDF could not be prepared for page editing."); }
+    const doc = opened as Mupdf.PDFDocument; const at = Math.max(0, Math.min(operation.at, doc.countPages()));
+    if (operation.type === "blank") {
+      const pageObject = doc.addPage([0, 0, operation.width, operation.height], 0, doc.newDictionary(), new Uint8Array()); doc.insertPage(at, pageObject);
+    } else {
+      const sourceBytes = operation.type === "insert" ? new Uint8Array(operation.bytes) : current.bytes; const sourceOpened = mupdf.Document.openDocument(sourceBytes, "application/pdf");
+      if (!sourceOpened.isPDF() || sourceOpened.needsPassword()) { sourceOpened.destroy(); doc.destroy(); throw new Error("The inserted PDF is unsupported or password protected."); }
+      const source = sourceOpened as Mupdf.PDFDocument;
+      if (operation.type === "duplicate") {
+        if (operation.source < 0 || operation.source >= source.countPages()) { source.destroy(); doc.destroy(); throw new Error("The page to duplicate is unavailable."); }
+        doc.graftPage(at, source, operation.source);
+      } else {
+        for (let index = 0; index < source.countPages(); index += 1) doc.graftPage(at + index, source, index);
+      }
+      source.destroy();
+    }
+    const saved = doc.saveToBuffer("garbage=4,compress=yes,clean=yes").asUint8Array(); const bytes = new Uint8Array(saved.length); bytes.set(saved); const pageCount = doc.countPages(); doc.destroy(); return { bytes, pageCount };
   }
 
   async destroy() { this.doc?.destroy(); this.doc = null; this.sourceBytes = null; }
