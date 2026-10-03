@@ -5,10 +5,12 @@
 - Worker-isolated MuPDF rendering
 - Command model and editor shell
 
-## Phase 1 — safe export
-- Map overlays into PDF coordinates
-- Embed text, ink, shapes, and redaction using MuPDF
-- Reopen, independently render, and structurally validate every export
+## Phase 1 — safe export (complete)
+- Map normalized editor overlays into MuPDF page coordinates
+- Bake text, ink, and shapes into the exported PDF
+- Apply destructive text redactions and persist page rotation
+- Clone the source for repeatable exports
+- Reopen, render, and structurally validate every export before download
 
 ## Phase 2 — page operations and persistence
 - Reorder, rotate, delete, crop, merge, split
