@@ -24,5 +24,12 @@
     "prettier": "^3.6.2",
     "turbo": "^2.5.8",
     "typescript": "^5.9.2"
+  },
+  "dependencies": {
+    "@capacitor/app": "^7.1.2",
+    "@capacitor/core": "^7.6.9",
+    "@capacitor/filesystem": "^7.1.9",
+    "@capacitor/share": "^7.0.4",
+    "@capacitor/status-bar": "^7.0.6"
   }
 }

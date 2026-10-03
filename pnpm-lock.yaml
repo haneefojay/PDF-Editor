@@ -7,6 +7,22 @@ settings:
 importers:
 
   .:
+    dependencies:
+      '@capacitor/app':
+        specifier: ^7.1.2
+        version: 7.1.2(@capacitor/core@7.6.9)
+      '@capacitor/core':
+        specifier: ^7.6.9
+        version: 7.6.9
+      '@capacitor/filesystem':
+        specifier: ^7.1.9
+        version: 7.1.9(@capacitor/core@7.6.9)
+      '@capacitor/share':
+        specifier: ^7.0.4
+        version: 7.0.4(@capacitor/core@7.6.9)
+      '@capacitor/status-bar':
+        specifier: ^7.0.6
+        version: 7.0.6(@capacitor/core@7.6.9)
     devDependencies:
       '@capacitor/android':
         specifier: ^7.6.9

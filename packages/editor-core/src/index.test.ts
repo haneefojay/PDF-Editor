@@ -3,7 +3,7 @@ import { applyCommand, EditorDocumentSchema, emptyDocument, inverseCommand, norm
 
 describe("commands", () => {
   it("applies and reverses an add", () => {
-    const command = { type: "add", overlay: { id: "1", page: 0, kind: "text", x: 1, y: 2, text: "Hello", size: 16, color: "#111" } } as const;
+    const command: Command = { type: "add", overlay: { id: "1", page: 0, kind: "text", x: 0.1, y: 0.2, width: 0.3, height: 0.06, text: "Hello", size: 16, color: "#111", fontFamily: "Helvetica", bold: false, italic: false, underline: false } };
     const next = applyCommand(emptyDocument(1), command);
     expect(next.overlays).toHaveLength(1);
     expect(applyCommand(next, inverseCommand(command)).overlays).toHaveLength(0);
@@ -25,6 +25,15 @@ describe("commands", () => {
     const cropped = applyCommand(emptyDocument(1), command);
     expect(cropped.crops[0]?.width).toBe(0.8);
     expect(applyCommand(cropped, inverseCommand(command)).crops[0]).toBeUndefined();
+  });
+
+  it("updates and restores an overlay", () => {
+    const before = { id: "shape", page: 0, kind: "shape", shape: "circle", x: 0.1, y: 0.1, width: 0.2, height: 0.2, color: "#111111", fillColor: null, strokeWidth: 2 } as const;
+    const after = { ...before, x: 0.4 };
+    const seeded = applyCommand(emptyDocument(1), { type: "add", overlay: before });
+    const command: Command = { type: "updateOverlay", before, after };
+    expect(applyCommand(seeded, command).overlays[0]).toMatchObject({ kind: "shape", x: 0.4 });
+    expect(applyCommand(applyCommand(seeded, command), inverseCommand(command)).overlays[0]).toMatchObject({ kind: "shape", x: 0.1 });
   });
 
   it("rejects corrupt persisted snapshots", () => {

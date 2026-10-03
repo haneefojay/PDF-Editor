@@ -31,6 +31,11 @@ const metadataOf = (doc: Mupdf.Document): PdfMetadata => ({
   subject: doc.getMetaData(mupdf.Document.META_INFO_SUBJECT) ?? "",
   keywords: doc.getMetaData(mupdf.Document.META_INFO_KEYWORDS) ?? "",
 });
+const annotationFont = (overlay: Extract<ExportOverlay, { kind: "text" }>) => {
+  if (overlay.fontFamily === "Times") return overlay.bold && overlay.italic ? "Times-BoldItalic" : overlay.bold ? "Times-Bold" : overlay.italic ? "Times-Italic" : "Times-Roman";
+  if (overlay.fontFamily === "Courier") return overlay.bold && overlay.italic ? "Courier-BoldOblique" : overlay.bold ? "Courier-Bold" : overlay.italic ? "Courier-Oblique" : "Courier";
+  return overlay.bold && overlay.italic ? "Helvetica-BoldOblique" : overlay.bold ? "Helvetica-Bold" : overlay.italic ? "Helvetica-Oblique" : "Helvetica";
+};
 
 class Engine implements PdfWorkerApi {
   private doc: Mupdf.PDFDocument | null = null;
@@ -114,12 +119,23 @@ class Engine implements PdfWorkerApi {
       if (overlay.page < 0 || overlay.page >= doc.countPages()) continue;
       const page = doc.loadPage(overlay.page); const bounds = page.getBounds();
       if (overlay.kind === "text") {
-        const annotation = page.createAnnotation("FreeText"); const [x, y] = pagePoint(overlay, bounds); const width = Math.max(80, Math.min(bounds[2] - x, overlay.text.length * overlay.size * 0.7 + 16));
-        annotation.setRect([x, Math.max(bounds[1], y - overlay.size * 1.25), x + width, y + overlay.size * 0.35]); annotation.setContents(overlay.text); annotation.setDefaultAppearance("Helv", overlay.size, toColor(overlay.color)); annotation.setColor(toColor(overlay.color)); annotation.setBorderWidth(0); annotation.setFlags(mupdf.PDFAnnotation.IS_PRINT); annotation.update(); annotation.destroy(); annotationCount += 1;
+        const annotation = page.createAnnotation("FreeText");
+        annotation.setRect(normalizedRect(overlay, bounds)); annotation.setContents(overlay.text); annotation.setDefaultAppearance(annotationFont(overlay), overlay.size, toColor(overlay.color)); annotation.setColor(toColor(overlay.color)); annotation.setBorderWidth(0); annotation.setFlags(mupdf.PDFAnnotation.IS_PRINT); annotation.update(); annotation.destroy(); annotationCount += 1;
+        if (overlay.underline) {
+          const box = normalizedRect(overlay, bounds); const underline = page.createAnnotation("Line");
+          underline.setLine([box[0], Math.min(box[3], box[1] + overlay.size * 1.25)], [box[2], Math.min(box[3], box[1] + overlay.size * 1.25)]);
+          underline.setColor(toColor(overlay.color)); underline.setBorderWidth(Math.max(1, overlay.size / 14)); underline.setFlags(mupdf.PDFAnnotation.IS_PRINT); underline.update(); underline.destroy(); annotationCount += 1;
+        }
       } else if (overlay.kind === "ink" || overlay.kind === "signature") {
         const annotation = page.createAnnotation("Ink"); annotation.setInkList([overlay.points.map((point) => pagePoint(point, bounds))]); annotation.setColor(toColor(overlay.color)); annotation.setBorderWidth(overlay.width); annotation.setFlags(mupdf.PDFAnnotation.IS_PRINT); annotation.update(); annotation.destroy(); annotationCount += 1;
       } else if (overlay.kind === "rect") {
         const annotation = page.createAnnotation("Square"); annotation.setRect(normalizedRect(overlay, bounds)); annotation.setColor(toColor(overlay.color)); annotation.setBorderWidth(2); annotation.setFlags(mupdf.PDFAnnotation.IS_PRINT); annotation.update(); annotation.destroy(); annotationCount += 1;
+      } else if (overlay.kind === "shape") {
+        const annotation = page.createAnnotation(overlay.shape === "circle" ? "Circle" : overlay.shape === "triangle" ? "Polygon" : "Square");
+        const box = normalizedRect(overlay, bounds);
+        if (overlay.shape === "triangle") annotation.setVertices([[(box[0] + box[2]) / 2, box[1]], [box[2], box[3]], [box[0], box[3]]]);
+        else annotation.setRect(box);
+        annotation.setColor(toColor(overlay.color)); if (overlay.fillColor) annotation.setInteriorColor(toColor(overlay.fillColor)); annotation.setBorderWidth(overlay.strokeWidth); annotation.setFlags(mupdf.PDFAnnotation.IS_PRINT); annotation.update(); annotation.destroy(); annotationCount += 1;
       } else if (overlay.kind === "image") {
         const image = new mupdf.Image(dataUrlBytes(overlay.dataUrl)); const annotation = page.createAnnotation("Stamp"); annotation.setRect(normalizedRect(overlay, bounds)); annotation.setStampImage(image); annotation.setFlags(mupdf.PDFAnnotation.IS_PRINT); annotation.update(); annotation.destroy(); image.destroy(); annotationCount += 1;
       } else if (overlay.kind === "redact") {

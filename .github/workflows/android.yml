@@ -23,14 +23,14 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "21"
-          cache: gradle
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
       - run: pnpm android:prepare
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v4
       - run: chmod +x android/gradlew && cd android && ./gradlew assembleDebug --no-daemon
       - uses: actions/upload-artifact@v4
         with:
