@@ -3,12 +3,34 @@ import * as Comlink from "comlink";
 import type { ExportOverlay, ExportRequest, FormField, PdfMetadata, PdfWorkerApi, PositionedTextLine } from "./protocol";
 import type * as Mupdf from "mupdf";
 import wasmUrl from "../node_modules/mupdf/dist/mupdf-wasm.wasm?url";
+import { bundledFontBase64 } from "./fontData";
 
 const wasmBinary = new Uint8Array(await (await fetch(wasmUrl)).arrayBuffer());
 const workerGlobal = globalThis as unknown as { process?: unknown; $libmupdf_wasm_Module?: { wasmBinary: Uint8Array } };
 workerGlobal.process = undefined;
 workerGlobal.$libmupdf_wasm_Module = { wasmBinary };
 const mupdf = await import("mupdf");
+const fontKeys = {
+  sans: {
+    regular: "Sans_Regular",
+    bold: "Sans_Bold",
+    italic: "Sans_Italic",
+    boldItalic: "Sans_BoldItalic",
+  },
+  serif: {
+    regular: "Serif_Regular",
+    bold: "Serif_Bold",
+    italic: "Serif_Italic",
+    boldItalic: "Serif_BoldItalic",
+  },
+  mono: {
+    regular: "Mono_Regular",
+    bold: "Mono_Bold",
+    italic: "Mono_Italic",
+    boldItalic: "Mono_BoldItalic",
+  },
+} as const satisfies Record<string, Record<string, keyof typeof bundledFontBase64>>;
+const fontBytes = new Map<string, Uint8Array>();
 
 const toColor = (hex: string): Mupdf.AnnotColor => {
   const match = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
@@ -30,9 +52,14 @@ const extractedColor = (color: Mupdf.Color) => {
   return `#${rgb.slice(0, 3).map((value) => Math.round(Math.min(1, Math.max(0, value)) * 255).toString(16).padStart(2, "0")).join("")}`;
 };
 const extractedFont = (name: string) => {
-  const lower = name.toLowerCase();
+  const clean = name.replace(/^[A-Z]{6}\+/, "");
+  const lower = clean.toLowerCase();
+  const family = clean
+    .replace(/(?:-|,)?(?:bolditalic|boldoblique|semibolditalic|semibold|bold|italic|oblique|regular|roman|medium|book|mt)$/i, "")
+    .replace(/MT$/i, "") || clean;
   return {
-    fontFamily: (lower.includes("courier") || lower.includes("mono") ? "Courier" : lower.includes("times") || lower.includes("serif") ? "Times" : "Helvetica") as PositionedTextLine["fontFamily"],
+    fontName: clean,
+    fontFamily: family,
     bold: lower.includes("bold") || lower.includes("black") || lower.includes("semibold"),
     italic: lower.includes("italic") || lower.includes("oblique"),
   };
@@ -43,10 +70,16 @@ const metadataOf = (doc: Mupdf.Document): PdfMetadata => ({
   subject: doc.getMetaData(mupdf.Document.META_INFO_SUBJECT) ?? "",
   keywords: doc.getMetaData(mupdf.Document.META_INFO_KEYWORDS) ?? "",
 });
-const appendTextContent = (doc: Mupdf.PDFDocument, page: Mupdf.PDFPage, overlay: Extract<ExportOverlay, { kind: "text" }>, resourceName: string) => {
+const appendTextContent = async (doc: Mupdf.PDFDocument, page: Mupdf.PDFPage, overlay: Extract<ExportOverlay, { kind: "text" }>, resourceName: string) => {
   const pageObject = page.getObject(); const bounds = page.getBounds(); const width = bounds[2] - bounds[0]; const height = bounds[3] - bounds[1];
-  const fontName = overlay.fontFamily === "Courier" ? overlay.bold ? "Courier-Bold" : overlay.italic ? "Courier-Oblique" : "Courier" : overlay.fontFamily === "Times" ? overlay.bold ? "Times-Bold" : overlay.italic ? "Times-Italic" : "Times-Roman" : overlay.bold ? "Helvetica-Bold" : overlay.italic ? "Helvetica-Oblique" : "Helvetica";
-  const font = new mupdf.Font(fontName); const fontReference = doc.addSimpleFont(font, mupdf.Font.SIMPLE_ENCODING_LATIN);
+  const mono = overlay.fontFamily.toLowerCase().includes("courier") || overlay.fontFamily.toLowerCase().includes("mono");
+  const serif = overlay.fontFamily.toLowerCase().includes("times") || overlay.fontFamily.toLowerCase().includes("serif") || overlay.fontFamily.toLowerCase().includes("georgia") || overlay.fontFamily.toLowerCase().includes("garamond") || overlay.fontFamily.toLowerCase().includes("cambria");
+  const category = mono ? "mono" : serif ? "serif" : "sans"; const variant = overlay.bold && overlay.italic ? "boldItalic" : overlay.bold ? "bold" : overlay.italic ? "italic" : "regular";
+  const fontKey = fontKeys[category][variant];
+  let data = fontBytes.get(fontKey);
+  if (!data) { const raw = atob(bundledFontBase64[fontKey]); data = Uint8Array.from(raw, (character) => character.charCodeAt(0)); fontBytes.set(fontKey, data); }
+  const font = new mupdf.Font(`Liberation ${category}`, data);
+  const fontReference = doc.addSimpleFont(font, mupdf.Font.SIMPLE_ENCODING_LATIN);
   let resources = pageObject.get("Resources");
   if (resources.isNull()) resources = pageObject.getInheritable("Resources");
   if (resources.isNull()) { resources = doc.newDictionary(); pageObject.put("Resources", resources); }
@@ -58,10 +91,7 @@ const appendTextContent = (doc: Mupdf.PDFDocument, page: Mupdf.PDFPage, overlay:
   const x = bounds[0] + overlay.x * width; const top = bounds[1] + overlay.y * height;
   const lines = overlay.text.split(/\r?\n/); const commands = ["q", "BT", `/${resourceName} ${overlay.size} Tf`, `${red} ${green} ${blue} rg`];
   lines.forEach((line, index) => {
-    const encoded = Array.from(line, (character) => {
-      const code = character.codePointAt(0) ?? 63;
-      return code > 0 && code <= 255 ? code : 63;
-    });
+    const encoded = Array.from(line, (character) => { const code = character.codePointAt(0) ?? 63; return code > 0 && code <= 255 ? code : 63; });
     const hex = encoded.map((code) => code.toString(16).padStart(2, "0")).join("");
     const y = bounds[3] - top - overlay.size - index * overlay.size * 1.2;
     commands.push(`1 0 0 1 ${x} ${y} Tm`, `<${hex}> Tj`);
@@ -208,7 +238,7 @@ class Engine implements PdfWorkerApi {
       const page = doc.loadPage(fill.page); const annotation = page.createAnnotation("Square"); annotation.setRect(normalizedRect(fill, page.getBounds())); annotation.setColor(toColor(fill.color)); annotation.setInteriorColor(toColor(fill.color)); annotation.setBorderWidth(0); annotation.setFlags(mupdf.PDFAnnotation.IS_PRINT); annotation.update(); annotation.destroy(); page.update(); page.destroy();
     }
     for (const overlay of textOverlays) {
-      const page = doc.loadPage(overlay.page); appendTextContent(doc, page, overlay, `PEF${annotationCount + 1}`); page.update(); page.destroy(); annotationCount += 1;
+      const page = doc.loadPage(overlay.page); await appendTextContent(doc, page, overlay, `PEF${annotationCount + 1}`); page.update(); page.destroy(); annotationCount += 1;
     }
     const uniquePages = new Set(request.pageOrder);
     if (request.pageOrder.length === 0 || uniquePages.size !== request.pageOrder.length || request.pageOrder.some((page) => page < 0 || page >= doc.countPages())) { doc.destroy(); throw new Error("Export validation failed: page order is invalid."); }

@@ -11,13 +11,14 @@ export type PositionedTextLine = {
   height: number;
   size: number;
   color: string;
-  fontFamily: "Helvetica" | "Times" | "Courier";
+  fontFamily: string;
+  fontName: string;
   bold: boolean;
   italic: boolean;
 };
 
 export type ExportOverlay =
-  | { id: string; page: number; kind: "text"; x: number; y: number; width: number; height: number; text: string; size: number; color: string; fontFamily: "Helvetica" | "Times" | "Courier"; bold: boolean; italic: boolean; underline: boolean }
+  | { id: string; page: number; kind: "text"; x: number; y: number; width: number; height: number; text: string; size: number; color: string; fontFamily: string; fontName: string | null; bold: boolean; italic: boolean; underline: boolean }
   | { id: string; page: number; kind: "ink" | "signature"; points: { x: number; y: number }[]; color: string; width: number }
   | { id: string; page: number; kind: "shape"; shape: "rectangle" | "square" | "circle" | "triangle"; x: number; y: number; width: number; height: number; color: string; fillColor: string | null; strokeWidth: number }
   | { id: string; page: number; kind: "rect"; x: number; y: number; width: number; height: number; color: string }

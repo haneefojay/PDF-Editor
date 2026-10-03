@@ -3,7 +3,7 @@ import { applyCommand, EditorDocumentSchema, emptyDocument, inverseCommand, norm
 
 describe("commands", () => {
   it("applies and reverses an add", () => {
-    const command: Command = { type: "add", overlay: { id: "1", page: 0, kind: "text", x: 0.1, y: 0.2, width: 0.3, height: 0.06, text: "Hello", size: 16, color: "#111", fontFamily: "Helvetica", bold: false, italic: false, underline: false } };
+    const command: Command = { type: "add", overlay: { id: "1", page: 0, kind: "text", x: 0.1, y: 0.2, width: 0.3, height: 0.06, text: "Hello", size: 16, color: "#111", fontFamily: "Helvetica", fontName: "Helvetica", bold: false, italic: false, underline: false } };
     const next = applyCommand(emptyDocument(1), command);
     expect(next.overlays).toHaveLength(1);
     expect(applyCommand(next, inverseCommand(command)).overlays).toHaveLength(0);
@@ -39,7 +39,7 @@ describe("commands", () => {
   it("adds and removes a replacement edit as one undoable command", () => {
     const overlays = [
       { id: "erase", page: 0, kind: "redact", x: 0.1, y: 0.1, width: 0.4, height: 0.04, color: "#ffffff" },
-      { id: "replacement", page: 0, kind: "text", x: 0.1, y: 0.1, width: 0.4, height: 0.04, text: "Replacement", size: 12, color: "#111111", fontFamily: "Helvetica", bold: false, italic: false, underline: false },
+      { id: "replacement", page: 0, kind: "text", x: 0.1, y: 0.1, width: 0.4, height: 0.04, text: "Replacement", size: 12, color: "#111111", fontFamily: "Helvetica", fontName: "Helvetica", bold: false, italic: false, underline: false },
     ] as const;
     const command: Command = { type: "addMany", overlays: [...overlays] };
     const edited = applyCommand(emptyDocument(1), command);
