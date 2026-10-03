@@ -105,7 +105,7 @@ const appendTextContent = async (doc: Mupdf.PDFDocument, page: Mupdf.PDFPage, ov
     }
     output.push(current); return output;
   }) : sourceLines);
-  const commands = ["q", "BT", `/${resourceName} ${effectiveSize} Tf`, `${overlay.letterSpacing} Tc`, `${red} ${green} ${blue} rg`];
+  const commands = ["q", "BT", `/${resourceName} ${effectiveSize} Tf`, `${overlay.letterSpacing} Tc`, `${red} ${green} ${blue} rg`, overlay.invisible ? "3 Tr" : "0 Tr"];
   lines.forEach((line, index) => {
     const encoded = Array.from(line, (character) => { const code = character.codePointAt(0) ?? 63; return code > 0 && code <= 255 ? code : 63; });
     const hex = encoded.map((code) => code.toString(16).padStart(2, "0")).join("");

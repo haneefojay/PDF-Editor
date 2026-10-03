@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type DragEvent, type PointerEvent as ReactPointerEvent, type TouchEvent as ReactTouchEvent } from "react";
-import { ArrowDown, ArrowUp, Bold, ChevronLeft, ChevronRight, Crop, Download, FileImage, FilePlus2, Highlighter, Info, Italic, ListChecks, Merge, MousePointer2, PenLine, Redo2, RotateCw, Scissors, Search, Shapes, Signature, Trash2, Type, Underline, Undo2, X, ZoomIn, ZoomOut } from "lucide-react";
+import { ArrowDown, ArrowUp, Bold, ChevronLeft, ChevronRight, Crop, Download, FileImage, FilePlus2, Highlighter, Info, Italic, ListChecks, Merge, MousePointer2, PenLine, Redo2, RotateCw, ScanText, Scissors, Search, Shapes, Signature, Trash2, Type, Underline, Undo2, X, ZoomIn, ZoomOut } from "lucide-react";
 import { createPdfEngine, type FormField, type PageInfo, type PdfMetadata, type PositionedTextLine } from "@paperless/pdf-engine";
 import { EditorDocumentSchema, normalizeRect, type EditorDocument, type Overlay, type Tool } from "@paperless/editor-core";
 import { deleteProject, listProjects, loadProject, saveProject, type ProjectSummary } from "./persistence";
 import { useEditor } from "./store";
 import { configureNativeUi, registerBackHandler, savePdf } from "./platform";
+import { createOcrRecognizer, ocrLanguages, type OcrLanguage, type ScanEnhancement } from "./ocr";
 
 const tools: { id: Tool; label: string; Icon: typeof MousePointer2 }[] = [
   { id: "select", label: "Select", Icon: MousePointer2 },
@@ -17,6 +18,7 @@ const tools: { id: Tool; label: string; Icon: typeof MousePointer2 }[] = [
 ];
 
 type OpenDoc = { id: string; name: string; bytes: ArrayBuffer; pages: PageInfo[]; urls: Map<string, string>; formFields: FormField[]; initialMetadata: PdfMetadata; initialFormValues: Record<string, string> };
+type FindResult = { sourcePage: number; line: PositionedTextLine; overlayId?: string };
 type ShapeKind = "rectangle" | "square" | "circle" | "triangle";
 const commonFonts = ["Arial", "Helvetica", "Calibri", "Cambria", "Times New Roman", "Georgia", "Garamond", "Verdana", "Tahoma", "Trebuchet MS", "Courier New", "Noto Sans", "Noto Serif"];
 const fontStack = (fontName: string | null | undefined, family: string) => `"${(fontName || family).replaceAll('"', "")}","${family.replaceAll('"', "")}",Arial,sans-serif`;
@@ -83,11 +85,19 @@ export function App() {
   const [showProperties, setShowProperties] = useState(false);
   const [showForms, setShowForms] = useState(false);
   const [showFind, setShowFind] = useState(false);
+  const [showOcr, setShowOcr] = useState(false);
   const [findQuery, setFindQuery] = useState("");
   const [replaceQuery, setReplaceQuery] = useState("");
   const [matchCase, setMatchCase] = useState(false);
-  const [findResults, setFindResults] = useState<{ sourcePage: number; line: PositionedTextLine }[]>([]);
+  const [findResults, setFindResults] = useState<FindResult[]>([]);
   const [searching, setSearching] = useState(false);
+  const [ocrLanguage, setOcrLanguage] = useState<OcrLanguage>("eng");
+  const [ocrScope, setOcrScope] = useState<"page" | "document">("page");
+  const [scanEnhancement, setScanEnhancement] = useState<ScanEnhancement>("document");
+  const [autoDeskew, setAutoDeskew] = useState(false);
+  const [ocrRunning, setOcrRunning] = useState(false);
+  const [ocrProgress, setOcrProgress] = useState("");
+  const [confidenceThreshold, setConfidenceThreshold] = useState(75);
   const [metadataDraft, setMetadataDraft] = useState<PdfMetadata>({ title: "", author: "", subject: "", keywords: "" });
   const [recent, setRecent] = useState<ProjectSummary[]>([]);
   const [image, setImage] = useState<string | null>(null);
@@ -281,12 +291,13 @@ export function App() {
     void registerBackHandler(() => {
       if (showProperties) { setShowProperties(false); return true; }
       if (showForms) { setShowForms(false); return true; }
+      if (showOcr) { setShowOcr(false); return true; }
       if (showFind) { setShowFind(false); return true; }
       if (open) { open.urls.forEach((url) => URL.revokeObjectURL(url)); setOpen(null); setImage(null); void refreshRecent(); return true; }
       return false;
     }).then((cleanup) => { dispose = cleanup; });
     return () => dispose();
-  }, [open, refreshRecent, showFind, showForms, showProperties]);
+  }, [open, refreshRecent, showFind, showForms, showOcr, showProperties]);
 
   const download = async () => {
     if (!open) return;
@@ -386,13 +397,28 @@ export function App() {
     if (!findQuery.trim() || !open) { setFindResults([]); return; }
     setSearching(true); setError("");
     try {
-      const needle = matchCase ? findQuery : findQuery.toLocaleLowerCase(); const results: { sourcePage: number; line: PositionedTextLine }[] = [];
+      const needle = matchCase ? findQuery : findQuery.toLocaleLowerCase(); const results: FindResult[] = [];
       for (const source of doc.pageOrder) {
         const lines = await withTimeout(engine.current!.api.extractTextLines(source), 20_000, `Text search timed out on page ${source + 1}.`);
         for (const line of lines) {
           const haystack = matchCase ? line.text : line.text.toLocaleLowerCase();
           if (haystack.includes(needle)) results.push({ sourcePage: source, line });
         }
+      }
+      for (const overlay of doc.overlays) {
+        if (overlay.kind !== "text" || !overlay.ocrSource) continue;
+        const haystack = matchCase ? overlay.text : overlay.text.toLocaleLowerCase();
+        if (!haystack.includes(needle)) continue;
+        results.push({
+          sourcePage: overlay.page,
+          overlayId: overlay.id,
+          line: {
+            id: overlay.id, text: overlay.text, x: overlay.x, y: overlay.y, width: overlay.width, height: overlay.height,
+            size: overlay.size, color: overlay.color, fontFamily: overlay.fontFamily, fontName: overlay.fontName ?? overlay.fontFamily,
+            bold: overlay.bold, italic: overlay.italic, alignment: overlay.alignment, lineHeight: overlay.lineHeight,
+            letterSpacing: overlay.letterSpacing, fitMode: overlay.fitMode,
+          },
+        });
       }
       setFindResults(results);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Document search failed."); }
@@ -403,11 +429,59 @@ export function App() {
     const escaped = findQuery.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); const expression = new RegExp(escaped, matchCase ? "g" : "gi"); const overlays: Overlay[] = [];
     for (const result of findResults) {
       const replacement = result.line.text.replace(expression, replaceQuery);
-      if (replacement !== result.line.text) overlays.push(...buildReplacementOverlays(result.line, replacement, result.sourcePage));
+      if (replacement === result.line.text) continue;
+      if (result.overlayId) {
+        const original = doc.overlays.find((overlay) => overlay.id === result.overlayId);
+        if (original?.kind === "text") execute({ type: "updateOverlay", before: original, after: { ...original, text: replacement } });
+      } else overlays.push(...buildReplacementOverlays(result.line, replacement, result.sourcePage));
     }
     if (overlays.length) execute({ type: "addMany", overlays });
     setNotice(`Replaced ${findResults.length} text ${findResults.length === 1 ? "run" : "runs"} across the document.`);
     setFindResults([]); setShowFind(false);
+  };
+
+  const runOcr = async () => {
+    if (!open || ocrRunning) return;
+    const pages = ocrScope === "document" ? [...doc.pageOrder] : [sourcePage];
+    setOcrRunning(true); setError(""); setOcrProgress("Loading the on-device OCR engine…");
+    let recognizer: Awaited<ReturnType<typeof createOcrRecognizer>> | null = null;
+    try {
+      recognizer = await createOcrRecognizer(
+        { language: ocrLanguage, enhancement: scanEnhancement, autoDeskew },
+        (message) => setOcrProgress(`${message.status} · ${Math.round(message.progress * 100)}%`),
+      );
+      const created: Extract<Overlay, { kind: "text" }>[] = [];
+      for (let index = 0; index < pages.length; index += 1) {
+        const source = pages[index]!;
+        setOcrProgress(`Recognising page ${index + 1} of ${pages.length}…`);
+        const png = await withTimeout(engine.current!.api.renderPage(source, 2.5), 45_000, `Page ${source + 1} could not be prepared for OCR.`);
+        const bytes = new Uint8Array(png.byteLength); bytes.set(png);
+        const url = URL.createObjectURL(new Blob([bytes.buffer], { type: "image/png" }));
+        try {
+          const lines = await recognizer.recognize(url);
+          const pageHeight = open.pages[source]!.height;
+          for (const line of lines) {
+            created.push({
+              id: crypto.randomUUID(), page: source, kind: "text", x: line.x, y: line.y, width: line.width, height: line.height,
+              text: line.text, size: Math.max(6, line.height * pageHeight * 0.78), color: "#000000",
+              fontFamily: "Arial", fontName: "Arial", bold: false, italic: false, underline: false,
+              alignment: "left", lineHeight: 1, letterSpacing: 0, fitMode: "shrink",
+              invisible: true, ocrConfidence: line.confidence, ocrSource: true,
+            });
+          }
+        } finally { URL.revokeObjectURL(url); }
+      }
+      const old = doc.overlays.filter((overlay) => overlay.kind === "text" && overlay.ocrSource && pages.includes(overlay.page));
+      if (old.length) execute({ type: "removeMany", overlays: old });
+      if (created.length) execute({ type: "addMany", overlays: created });
+      const low = created.filter((overlay) => (overlay.ocrConfidence ?? 100) < confidenceThreshold).length;
+      setNotice(`OCR added ${created.length} searchable text lines across ${pages.length} ${pages.length === 1 ? "page" : "pages"}. ${low} need confidence review.`);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "OCR failed on this document.");
+    } finally {
+      await recognizer?.terminate().catch(() => undefined);
+      setOcrRunning(false); setOcrProgress("");
+    }
   };
 
   const mergePdf = async (file: File) => {
@@ -469,6 +543,8 @@ export function App() {
   );
 
   const current = doc.overlays.filter((item) => item.page === sourcePage);
+  const ocrText = doc.overlays.filter((overlay): overlay is Extract<Overlay, { kind: "text" }> => overlay.kind === "text" && Boolean(overlay.ocrSource));
+  const lowConfidenceOcr = ocrText.filter((overlay) => (overlay.ocrConfidence ?? 100) < confidenceThreshold);
   const selected = current.find((item) => item.id === selectedId) ?? null;
   const fontOptions = Array.from(new Set([...textLines.map((line) => line.fontName), ...current.filter((item): item is Extract<Overlay, { kind: "text" }> => item.kind === "text").map((item) => item.fontName || item.fontFamily), ...commonFonts].filter(Boolean)));
   const pageInfo = open.pages[sourcePage]!;
@@ -484,7 +560,7 @@ export function App() {
       <aside className="rail"><div className="railTitle"><b>Pages</b><span>{doc.pageOrder.length}</span></div>{doc.pageOrder.map((source, index) => <div key={source} role="button" tabIndex={0} className={index === page ? "thumb active" : "thumb"} onClick={() => setPage(index)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") setPage(index); }}><span>{index + 1}</span><div className="thumbPreview">Page {source + 1}</div><span className="pageActions"><button aria-label={`Move page ${index + 1} up`} disabled={index === 0} onClick={(event) => { event.stopPropagation(); movePage(index, -1); }}><ArrowUp /></button><button aria-label={`Move page ${index + 1} down`} disabled={index === doc.pageOrder.length - 1} onClick={(event) => { event.stopPropagation(); movePage(index, 1); }}><ArrowDown /></button><button aria-label={`Delete page ${index + 1}`} onClick={(event) => { event.stopPropagation(); removePage(index); }}><Trash2 /></button></span></div>)}</aside>
       <main className="canvasArea">
         <div className="toolRegion">
-          <nav className="tools" aria-label="Editing tools">{tools.map(({ id, label, Icon }) => <button key={id} className={tool === id ? "chosen" : ""} aria-pressed={tool === id} onClick={() => { setTool(id); if (id !== "select") { setSelectedId(null); setOriginalEdit(null); } else setNotice(textLines.length ? "Tap existing PDF text to edit it, or tap an added object to move or resize it." : "No selectable text was found on this page. It may be a scanned image; use Add text until OCR is available."); }}><Icon /><span>{label}</span></button>)}<span className="divide" /><button onClick={() => imageInput.current?.click()}><FileImage /><span>Image</span></button><input ref={imageInput} hidden type="file" accept="image/png,image/jpeg" onChange={(event) => { const file = event.target.files?.[0]; if (file) void addImage(file); event.target.value = ""; }} /><button onClick={() => execute({ type: "rotate", page: sourcePage, before: doc.rotations[sourcePage] ?? 0, after: (doc.rotations[sourcePage] ?? 0) + 90 })}><RotateCw /><span>Rotate</span></button><button onClick={() => mergeInput.current?.click()}><Merge /><span>Merge</span></button><input ref={mergeInput} hidden type="file" accept="application/pdf,.pdf" onChange={(event) => { const file = event.target.files?.[0]; if (file) void mergePdf(file); event.target.value = ""; }} /><button onClick={() => void splitCurrentPage()}><Scissors /><span>Split</span></button><button onClick={() => { setMetadataDraft(doc.metadata); setShowProperties(true); }}><Info /><span>Properties</span></button><button title={open.formFields.length ? "Edit interactive PDF fields" : "No interactive form fields detected"} onClick={() => open.formFields.length ? setShowForms(true) : setNotice("This PDF has no interactive form fields.")}><ListChecks /><span>Forms</span></button><button onClick={() => { setFindResults([]); setShowFind(true); }}><Search /><span>Find</span></button></nav>
+          <nav className="tools" aria-label="Editing tools">{tools.map(({ id, label, Icon }) => <button key={id} className={tool === id ? "chosen" : ""} aria-pressed={tool === id} onClick={() => { setTool(id); if (id !== "select") { setSelectedId(null); setOriginalEdit(null); } else setNotice(textLines.length ? "Tap existing PDF text to edit it, or tap an added object to move or resize it." : ocrText.some((item) => item.page === sourcePage) ? "This scanned page has a searchable OCR layer. Open OCR to review recognised text." : "No selectable text was found. Run OCR to make this scanned page searchable."); }}><Icon /><span>{label}</span></button>)}<span className="divide" /><button onClick={() => imageInput.current?.click()}><FileImage /><span>Image</span></button><input ref={imageInput} hidden type="file" accept="image/png,image/jpeg" onChange={(event) => { const file = event.target.files?.[0]; if (file) void addImage(file); event.target.value = ""; }} /><button onClick={() => execute({ type: "rotate", page: sourcePage, before: doc.rotations[sourcePage] ?? 0, after: (doc.rotations[sourcePage] ?? 0) + 90 })}><RotateCw /><span>Rotate</span></button><button onClick={() => { setShowOcr(true); setOcrProgress(""); }}><ScanText /><span>OCR</span></button><button onClick={() => mergeInput.current?.click()}><Merge /><span>Merge</span></button><input ref={mergeInput} hidden type="file" accept="application/pdf,.pdf" onChange={(event) => { const file = event.target.files?.[0]; if (file) void mergePdf(file); event.target.value = ""; }} /><button onClick={() => void splitCurrentPage()}><Scissors /><span>Split</span></button><button onClick={() => { setMetadataDraft(doc.metadata); setShowProperties(true); }}><Info /><span>Properties</span></button><button title={open.formFields.length ? "Edit interactive PDF fields" : "No interactive form fields detected"} onClick={() => open.formFields.length ? setShowForms(true) : setNotice("This PDF has no interactive form fields.")}><ListChecks /><span>Forms</span></button><button onClick={() => { setFindResults([]); setShowFind(true); }}><Search /><span>Find</span></button></nav>
           {(tool === "shape" || tool === "ink" || tool === "signature" || selected || originalEdit) && <div className="contextBar">
             {tool === "shape" && <label>Shape<select value={shapeKind} onChange={(event) => setShapeKind(event.target.value as ShapeKind)}><option value="rectangle">Rectangle</option><option value="square">Square</option><option value="circle">Circle</option><option value="triangle">Triangle</option></select></label>}
             {(tool === "shape" || tool === "ink" || tool === "signature") && <label>Colour<input aria-label="Drawing colour" type="color" value={drawColor} onChange={(event) => setDrawColor(event.target.value)} /></label>}
@@ -500,6 +576,7 @@ export function App() {
     </div>
     {showProperties && <div className="modalBackdrop" role="presentation"><section className="modal" role="dialog" aria-modal="true" aria-label="Document properties"><header><h2>Document properties</h2><button aria-label="Close properties" onClick={() => setShowProperties(false)}><X /></button></header>{(["title", "author", "subject", "keywords"] as const).map((key) => <label key={key}>{key.charAt(0).toUpperCase() + key.slice(1)}<input value={metadataDraft[key]} onChange={(event) => setMetadataDraft({ ...metadataDraft, [key]: event.target.value })} /></label>)}<footer><button onClick={() => setShowProperties(false)}>Cancel</button><button className="primary" onClick={saveMetadata}>Save properties</button></footer></section></div>}
     {showForms && <div className="modalBackdrop" role="presentation"><section className="modal" role="dialog" aria-modal="true" aria-label="PDF form fields"><header><h2>Form fields</h2><button aria-label="Close forms" onClick={() => setShowForms(false)}><X /></button></header>{open.formFields.map((field) => <label key={`${field.page}-${field.name}`}>{field.label || field.name}<span>Page {field.page + 1}</span>{field.type === "choice" ? <select disabled={field.readOnly} value={doc.formValues[field.name] ?? field.value} onChange={(event) => execute({ type: "setFormValue", name: field.name, before: doc.formValues[field.name] ?? field.value, after: event.target.value })}>{field.options.map((option) => <option key={option}>{option}</option>)}</select> : field.type === "checkbox" || field.type === "radio" ? <input disabled={field.readOnly} type="checkbox" checked={(doc.formValues[field.name] ?? field.value) !== "Off"} onChange={(event) => execute({ type: "setFormValue", name: field.name, before: doc.formValues[field.name] ?? field.value, after: event.target.checked ? "Yes" : "Off" })} /> : <input disabled={field.readOnly} defaultValue={doc.formValues[field.name] ?? field.value} onBlur={(event) => execute({ type: "setFormValue", name: field.name, before: doc.formValues[field.name] ?? field.value, after: event.target.value })} />}</label>)}<footer><button className="primary" onClick={() => setShowForms(false)}>Done</button></footer></section></div>}
+    {showOcr && <div className="modalBackdrop" role="presentation"><section className="modal ocrModal" role="dialog" aria-modal="true" aria-label="Scan and OCR"><header><div><h2>Scan and OCR</h2><p>Recognition runs on this device. The exported PDF receives an invisible, searchable text layer.</p></div><button aria-label="Close OCR" disabled={ocrRunning} onClick={() => setShowOcr(false)}><X /></button></header><div className="ocrSettings"><label>Language<select value={ocrLanguage} disabled={ocrRunning} onChange={(event) => setOcrLanguage(event.target.value as OcrLanguage)}>{ocrLanguages.map((language) => <option key={language.code} value={language.code}>{language.label}</option>)}</select></label><label>Pages<select value={ocrScope} disabled={ocrRunning} onChange={(event) => setOcrScope(event.target.value as "page" | "document")}><option value="page">Current page</option><option value="document">Entire document</option></select></label><label>Scan cleanup<select value={scanEnhancement} disabled={ocrRunning} onChange={(event) => setScanEnhancement(event.target.value as ScanEnhancement)}><option value="none">Original</option><option value="grayscale">Grayscale</option><option value="document">Auto contrast + grayscale</option></select></label><label>Review below<CompactNumberInput label="Low confidence threshold" value={confidenceThreshold} min={1} max={99} onCommit={setConfidenceThreshold} /></label></div><label className="checkLabel"><input type="checkbox" checked={autoDeskew} disabled={ocrRunning} onChange={(event) => setAutoDeskew(event.target.checked)} />Auto-deskew recognition</label><p className="ocrHint">Use the existing Rotate tool for sideways pages. Cleanup affects recognition without flattening or degrading the original scan.</p>{ocrProgress && <div className="ocrProgress" role="status"><span className="spinner" />{ocrProgress}</div>}<div className="ocrReviewHeader"><div><b>Confidence review</b><span>{ocrText.length} recognised lines · {lowConfidenceOcr.length} below {confidenceThreshold}%</span></div>{ocrText.length > 0 && <button className="danger" disabled={ocrRunning} onClick={() => { const targets = doc.overlays.filter((overlay) => overlay.kind === "text" && overlay.ocrSource && (ocrScope === "document" || overlay.page === sourcePage)); if (targets.length) execute({ type: "removeMany", overlays: targets }); }}>Remove OCR layer</button>}</div>{lowConfidenceOcr.length > 0 ? <div className="ocrReview">{lowConfidenceOcr.slice(0, 200).map((overlay) => <label key={overlay.id}><span><b>Page {doc.pageOrder.indexOf(overlay.page) + 1}</b><em>{Math.round(overlay.ocrConfidence ?? 0)}%</em></span><input defaultValue={overlay.text} onBlur={(event) => { if (event.target.value !== overlay.text) execute({ type: "updateOverlay", before: overlay, after: { ...overlay, text: event.target.value } }); }} /></label>)}</div> : <div className="emptyReview">{ocrText.length ? "No recognised lines are below the review threshold." : "Run OCR to create a searchable text layer and review uncertain lines."}</div>}<footer><button disabled={ocrRunning} onClick={() => setShowOcr(false)}>Done</button><button className="primary" disabled={ocrRunning} onClick={() => void runOcr()}>{ocrRunning ? "Recognising…" : ocrScope === "document" ? "OCR entire document" : "OCR current page"}</button></footer></section></div>}
     {showFind && <div className="modalBackdrop" role="presentation"><section className="modal findModal" role="dialog" aria-modal="true" aria-label="Find and replace"><header><h2>Find and replace</h2><button aria-label="Close find and replace" onClick={() => setShowFind(false)}><X /></button></header><label>Find<input autoFocus value={findQuery} onChange={(event) => setFindQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void runFind(); }} /></label><label>Replace with<input value={replaceQuery} onChange={(event) => setReplaceQuery(event.target.value)} /></label><label className="checkLabel"><input type="checkbox" checked={matchCase} onChange={(event) => setMatchCase(event.target.checked)} />Match case</label><div className="findSummary">{searching ? "Searching locally…" : `${findResults.length} matching text ${findResults.length === 1 ? "run" : "runs"}`}</div>{findResults.length > 0 && <div className="findResults">{findResults.slice(0, 100).map((result) => <button key={`${result.sourcePage}-${result.line.id}`} onClick={() => { const displayPage = doc.pageOrder.indexOf(result.sourcePage); if (displayPage >= 0) setPage(displayPage); setShowFind(false); }}><b>Page {doc.pageOrder.indexOf(result.sourcePage) + 1}</b><span>{result.line.text.trim()}</span></button>)}</div>}<footer><button onClick={() => setShowFind(false)}>Cancel</button><button onClick={() => void runFind()} disabled={searching || !findQuery.trim()}>Find all</button><button className="primary" onClick={replaceAllMatches} disabled={!findResults.length}>Replace all</button></footer></section></div>}
     {error && <div className="toast" role="alert">{error}</div>}{notice && <div className="toast success" role="status">{notice}</div>}
   </div>;
@@ -608,9 +685,9 @@ function PageCanvas({ image, info, zoom, rotation, overlays, textLines, original
       {liveRect && tool === "crop" && <rect className="cropRect" x={liveRect.x} y={liveRect.y} width={liveRect.width} height={liveRect.height} />}
       {crop && <rect className="cropRect" x={crop.x} y={crop.y} width={crop.width} height={crop.height} />}
     </svg>
-    {shown.filter((overlay): overlay is Extract<Overlay, { kind: "text" }> => overlay.kind === "text").map((overlay) => <span key={overlay.id} className="textOverlay" style={{ left: `${overlay.x * 100}%`, top: `${overlay.y * 100}%`, width: `${overlay.width * 100}%`, height: `${overlay.height * 100}%`, fontSize: fittedFontSize(overlay, overlay.text, info) * zoom, color: overlay.color, fontFamily: fontStack(overlay.fontName, overlay.fontFamily), fontWeight: overlay.bold ? 700 : 400, fontStyle: overlay.italic ? "italic" : "normal", textDecoration: overlay.underline ? "underline" : "none", textAlign: overlay.alignment, lineHeight: overlay.lineHeight, letterSpacing: overlay.letterSpacing * zoom }}>{overlay.text}</span>)}
+    {shown.filter((overlay): overlay is Extract<Overlay, { kind: "text" }> => overlay.kind === "text" && !overlay.invisible).map((overlay) => <span key={overlay.id} className="textOverlay" style={{ left: `${overlay.x * 100}%`, top: `${overlay.y * 100}%`, width: `${overlay.width * 100}%`, height: `${overlay.height * 100}%`, fontSize: fittedFontSize(overlay, overlay.text, info) * zoom, color: overlay.color, fontFamily: fontStack(overlay.fontName, overlay.fontFamily), fontWeight: overlay.bold ? 700 : 400, fontStyle: overlay.italic ? "italic" : "normal", textDecoration: overlay.underline ? "underline" : "none", textAlign: overlay.alignment, lineHeight: overlay.lineHeight, letterSpacing: overlay.letterSpacing * zoom }}>{overlay.text}</span>)}
     {tool === "select" && textLines.filter((line) => !lineWasReplaced(line)).map((line) => <button key={line.id} className={`originalTextHit ${originalEdit?.line.id === line.id ? "selected" : ""}`} aria-label={`Edit PDF text: ${line.text.trim().slice(0, 80)}`} style={{ left: `${line.x * 100}%`, top: `${line.y * 100}%`, width: `${line.width * 100}%`, height: `${line.height * 100}%` }} onPointerDown={(event) => { event.stopPropagation(); onOriginalSelect(line); }} />)}
     {originalEdit && editorBox && <textarea autoFocus className="originalTextEditor" aria-label="Edit original PDF text" value={originalEdit.draft} style={{ left: `${originalEdit.line.x * 100}%`, top: `${originalEdit.line.y * 100}%`, width: `${editorBox.width * 100}%`, height: `${editorBox.height * 100}%`, fontSize: fittedFontSize(originalEdit.line, originalEdit.draft, info) * zoom, color: originalEdit.line.color, fontFamily: fontStack(originalEdit.line.fontName, originalEdit.line.fontFamily), fontWeight: originalEdit.line.bold ? 700 : 400, fontStyle: originalEdit.line.italic ? "italic" : "normal", textAlign: originalEdit.line.alignment, lineHeight: originalEdit.line.lineHeight, letterSpacing: originalEdit.line.letterSpacing * zoom }} onPointerDown={(event) => event.stopPropagation()} onChange={(event) => onOriginalChange(event.target.value)} />}
-    {tool === "select" && shown.map((overlay) => { const bounds = boundsOf(overlay); const selected = selectedId === overlay.id; return <div key={`hit-${overlay.id}`} className={`objectBox ${selected ? "selected" : ""}`} style={{ left: `${bounds.x * 100}%`, top: `${bounds.y * 100}%`, width: `${bounds.width * 100}%`, height: `${bounds.height * 100}%` }} onPointerDown={(event) => objectDown(event, overlay, "move")}>{selected && <button className="resizeHandle" aria-label="Resize selected object" onPointerDown={(event) => objectDown(event, overlay, "resize")} />}</div>; })}
+    {tool === "select" && shown.filter((overlay) => overlay.kind !== "text" || !overlay.invisible).map((overlay) => { const bounds = boundsOf(overlay); const selected = selectedId === overlay.id; return <div key={`hit-${overlay.id}`} className={`objectBox ${selected ? "selected" : ""}`} style={{ left: `${bounds.x * 100}%`, top: `${bounds.y * 100}%`, width: `${bounds.width * 100}%`, height: `${bounds.height * 100}%` }} onPointerDown={(event) => objectDown(event, overlay, "move")}>{selected && <button className="resizeHandle" aria-label="Resize selected object" onPointerDown={(event) => objectDown(event, overlay, "resize")} />}</div>; })}
   </div></div>;
 }

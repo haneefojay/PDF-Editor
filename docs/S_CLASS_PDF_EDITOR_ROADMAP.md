@@ -43,10 +43,10 @@ Sources:
 
 ### Phase B — OCR and search
 
-- [ ] On-device OCR for image-only pages with language selection.
-- [ ] Searchable invisible text layer and confidence review.
-- [ ] Full-document search with results, page navigation, and replace workflow.
-- [ ] Deskew, rotate, contrast cleanup, and scan enhancement.
+- [x] On-device OCR for image-only pages with language selection.
+- [x] Searchable invisible text layer and confidence review.
+- [x] Full-document search with results, page navigation, and replace workflow.
+- [x] Deskew, rotate, contrast cleanup, and scan enhancement.
 
 **Exit gate:** OCR output remains local, searchable, selectable, and exportable; low-confidence text is surfaced instead of silently accepted.
 
