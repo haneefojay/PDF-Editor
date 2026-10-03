@@ -35,9 +35,9 @@ Sources:
 - [x] Pinch-to-zoom around the gesture midpoint while preserving one-finger panning.
 - [x] Deselect objects and text by tapping empty canvas space.
 - [x] Explain when a page has no selectable text layer.
-- [ ] Character/run-level editing inside mixed-style lines.
-- [ ] Paragraph boxes with reflow, alignment, line spacing, character spacing, and text fitting.
-- [ ] Find and replace across pages.
+- [x] Character/run-level editing inside mixed-style lines.
+- [x] Paragraph boxes with reflow, alignment, line spacing, character spacing, and text fitting.
+- [x] Find and replace across pages.
 
 **Exit gate:** edits round-trip through independent PDF parsers without corrupt resources; visual regression tests cover mobile and desktop.
 

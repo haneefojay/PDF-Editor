@@ -88,9 +88,14 @@ const appendTextContent = async (doc: Mupdf.PDFDocument, page: Mupdf.PDFPage, ov
   if (fonts.isNull()) { fonts = doc.newDictionary(); resources.put("Font", fonts); }
   fonts.resolve().put(resourceName, fontReference);
   const [red, green, blue] = toColor(overlay.color) as [number, number, number];
-  const x = bounds[0] + overlay.x * width; const top = bounds[1] + overlay.y * height;
-  const widthFactor = category === "mono" ? 0.62 : category === "serif" ? 0.52 : 0.56; const maxCharacters = Math.max(1, Math.floor(overlay.width * width / (overlay.size * (widthFactor + (overlay.bold ? 0.03 : 0)))));
-  const lines = overlay.text.split(/\r?\n/).flatMap((paragraph) => {
+  const boxX = bounds[0] + overlay.x * width; const boxWidth = overlay.width * width; const top = bounds[1] + overlay.y * height;
+  const widthFactor = category === "mono" ? 0.62 : category === "serif" ? 0.52 : 0.56; const factor = widthFactor + (overlay.bold ? 0.03 : 0);
+  const longestSourceLine = Math.max(...overlay.text.split(/\r?\n/).map((line) => line.length), 1);
+  const naturalWidth = longestSourceLine * overlay.size * factor + Math.max(0, longestSourceLine - 1) * overlay.letterSpacing;
+  const effectiveSize = overlay.fitMode === "shrink" && naturalWidth > boxWidth ? Math.max(6, overlay.size * boxWidth / naturalWidth) : overlay.size;
+  const maxCharacters = Math.max(1, Math.floor((boxWidth + overlay.letterSpacing) / (effectiveSize * factor + overlay.letterSpacing)));
+  const sourceLines = overlay.text.split(/\r?\n/);
+  const lines = (overlay.fitMode === "auto" ? sourceLines.flatMap((paragraph) => {
     if (paragraph.length <= maxCharacters) return [paragraph];
     const output: string[] = []; let current = "";
     for (const word of paragraph.split(/(\s+)/)) {
@@ -99,14 +104,17 @@ const appendTextContent = async (doc: Mupdf.PDFDocument, page: Mupdf.PDFPage, ov
       while (current.length > maxCharacters) { output.push(current.slice(0, maxCharacters)); current = current.slice(maxCharacters); }
     }
     output.push(current); return output;
-  });
-  const commands = ["q", "BT", `/${resourceName} ${overlay.size} Tf`, `${red} ${green} ${blue} rg`];
+  }) : sourceLines);
+  const commands = ["q", "BT", `/${resourceName} ${effectiveSize} Tf`, `${overlay.letterSpacing} Tc`, `${red} ${green} ${blue} rg`];
   lines.forEach((line, index) => {
     const encoded = Array.from(line, (character) => { const code = character.codePointAt(0) ?? 63; return code > 0 && code <= 255 ? code : 63; });
     const hex = encoded.map((code) => code.toString(16).padStart(2, "0")).join("");
-    const y = bounds[3] - top - overlay.size - index * overlay.size * 1.2;
-    commands.push(`1 0 0 1 ${x} ${y} Tm`, `<${hex}> Tj`);
-    if (overlay.underline) commands.push("ET", `${Math.max(0.7, overlay.size / 14)} w`, `${x} ${y - 2} m ${x + overlay.width * width} ${y - 2} l S`, "BT", `/${resourceName} ${overlay.size} Tf`, `${red} ${green} ${blue} rg`);
+    const lineWidth = line.length * effectiveSize * factor + Math.max(0, line.length - 1) * overlay.letterSpacing;
+    const x = overlay.alignment === "center" ? boxX + Math.max(0, (boxWidth - lineWidth) / 2) : overlay.alignment === "right" ? boxX + Math.max(0, boxWidth - lineWidth) : boxX;
+    const y = bounds[3] - top - effectiveSize - index * effectiveSize * overlay.lineHeight;
+    const spaces = (line.match(/ /g) ?? []).length; const justifySpacing = overlay.alignment === "justify" && index < lines.length - 1 && spaces > 0 ? Math.max(0, (boxWidth - lineWidth) / spaces) : 0;
+    commands.push(`${justifySpacing} Tw`, `1 0 0 1 ${x} ${y} Tm`, `<${hex}> Tj`);
+    if (overlay.underline) commands.push("ET", `${Math.max(0.7, effectiveSize / 14)} w`, `${x} ${y - 2} m ${x + Math.min(boxWidth, lineWidth + justifySpacing * spaces)} ${y - 2} l S`, "BT", `/${resourceName} ${effectiveSize} Tf`, `${overlay.letterSpacing} Tc`, `${red} ${green} ${blue} rg`);
   });
   commands.push("ET", "Q");
   const stream = doc.addStream(new TextEncoder().encode(commands.join("\n")), doc.newDictionary());
@@ -161,26 +169,36 @@ class Engine implements PdfWorkerApi {
     const page = this.doc.loadPage(index); const bounds = page.getBounds(); const pageWidth = bounds[2] - bounds[0]; const pageHeight = bounds[3] - bounds[1];
     const structured = page.toStructuredText("preserve-whitespace");
     const lines: PositionedTextLine[] = [];
-    type StyleSample = { count: number; size: number; color: string; fontName: string };
-    let current: { bbox: Mupdf.Rect; text: string; styles: Map<string, StyleSample> } | null = null;
+    let lineIndex = -1; let runIndex = 0;
+    let run: { key: string; text: string; bbox: Mupdf.Rect; size: number; color: string; fontName: string; pendingSpace: { text: string; bbox: Mupdf.Rect } | null } | null = null;
+    const unionRect = (a: Mupdf.Rect, b: Mupdf.Rect): Mupdf.Rect => [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[2], b[2]), Math.max(a[3], b[3])];
+    const flushRun = () => {
+      if (run?.pendingSpace) { run.text += run.pendingSpace.text; run.bbox = unionRect(run.bbox, run.pendingSpace.bbox); run.pendingSpace = null; }
+      if (!run || !run.text.trim()) { run = null; return; }
+      const font = extractedFont(run.fontName); const [x0, y0, x1, y1] = run.bbox;
+      lines.push({ id: `${index}-${lineIndex}-${runIndex++}`, text: run.text, x: (x0 - bounds[0]) / pageWidth, y: (y0 - bounds[1]) / pageHeight, width: Math.max(0.005, (x1 - x0) / pageWidth), height: Math.max(0.005, (y1 - y0) / pageHeight), size: run.size, color: run.color, alignment: "left", lineHeight: 1.2, letterSpacing: 0, fitMode: "auto", ...font });
+      run = null;
+    };
     structured.walk({
-      beginLine: (bbox) => { current = { bbox, text: "", styles: new Map() }; },
-      onChar: (char, _origin, font, size, _quad, color) => {
-        if (!current) return;
-        current.text += char;
-        if (!char.trim()) return;
+      beginLine: () => { flushRun(); lineIndex += 1; runIndex = 0; },
+      onChar: (char, _origin, font, size, quad, color) => {
         const fontName = font.getName(); const hex = extractedColor(color); const key = `${fontName}\u0000${Math.round(size * 100) / 100}\u0000${hex}`;
-        const sample = current.styles.get(key);
-        if (sample) sample.count += 1; else current.styles.set(key, { count: 1, size, color: hex, fontName });
+        const xs = [quad[0], quad[2], quad[4], quad[6]]; const ys = [quad[1], quad[3], quad[5], quad[7]];
+        const charBox: Mupdf.Rect = [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+        if (!char.trim() && run) {
+          run.pendingSpace = run.pendingSpace ? { text: run.pendingSpace.text + char, bbox: unionRect(run.pendingSpace.bbox, charBox) } : { text: char, bbox: charBox };
+          return;
+        }
+        const carriedSpace = run?.pendingSpace ?? null;
+        if (run && run.key !== key) { run.pendingSpace = null; flushRun(); }
+        if (!run) run = { key, text: carriedSpace?.text ?? "", bbox: carriedSpace ? unionRect(carriedSpace.bbox, charBox) : charBox, size, color: hex, fontName, pendingSpace: null };
+        else if (run.pendingSpace) { run.text += run.pendingSpace.text; run.bbox = unionRect(run.bbox, run.pendingSpace.bbox); run.pendingSpace = null; }
+        run.text += char;
+        run.bbox = unionRect(run.bbox, charBox);
       },
-      endLine: () => {
-        if (!current || !current.text.trim()) { current = null; return; }
-        const dominant = [...current.styles.values()].sort((a, b) => b.count - a.count)[0] ?? { count: 1, size: 12, color: "#171714", fontName: "Helvetica" };
-        const font = extractedFont(dominant.fontName); const [x0, y0, x1, y1] = current.bbox;
-        lines.push({ id: `${index}-${lines.length}`, text: current.text, x: (x0 - bounds[0]) / pageWidth, y: (y0 - bounds[1]) / pageHeight, width: Math.max(0.005, (x1 - x0) / pageWidth), height: Math.max(0.005, (y1 - y0) / pageHeight), size: dominant.size, color: dominant.color, ...font });
-        current = null;
-      },
+      endLine: flushRun,
     });
+    flushRun();
     structured.destroy(); page.destroy(); return lines;
   }
 

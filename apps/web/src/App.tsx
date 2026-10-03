@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type DragEvent, type PointerEvent as ReactPointerEvent, type TouchEvent as ReactTouchEvent } from "react";
-import { ArrowDown, ArrowUp, Bold, ChevronLeft, ChevronRight, Crop, Download, FileImage, FilePlus2, Highlighter, Info, Italic, ListChecks, Merge, MousePointer2, PenLine, Redo2, RotateCw, Scissors, Shapes, Signature, Trash2, Type, Underline, Undo2, X, ZoomIn, ZoomOut } from "lucide-react";
+import { ArrowDown, ArrowUp, Bold, ChevronLeft, ChevronRight, Crop, Download, FileImage, FilePlus2, Highlighter, Info, Italic, ListChecks, Merge, MousePointer2, PenLine, Redo2, RotateCw, Scissors, Search, Shapes, Signature, Trash2, Type, Underline, Undo2, X, ZoomIn, ZoomOut } from "lucide-react";
 import { createPdfEngine, type FormField, type PageInfo, type PdfMetadata, type PositionedTextLine } from "@paperless/pdf-engine";
 import { EditorDocumentSchema, normalizeRect, type EditorDocument, type Overlay, type Tool } from "@paperless/editor-core";
 import { deleteProject, listProjects, loadProject, saveProject, type ProjectSummary } from "./persistence";
@@ -20,22 +20,29 @@ type OpenDoc = { id: string; name: string; bytes: ArrayBuffer; pages: PageInfo[]
 type ShapeKind = "rectangle" | "square" | "circle" | "triangle";
 const commonFonts = ["Arial", "Helvetica", "Calibri", "Cambria", "Times New Roman", "Georgia", "Garamond", "Verdana", "Tahoma", "Trebuchet MS", "Courier New", "Noto Sans", "Noto Serif"];
 const fontStack = (fontName: string | null | undefined, family: string) => `"${(fontName || family).replaceAll('"', "")}","${family.replaceAll('"', "")}",Arial,sans-serif`;
-const layoutTextBox = (style: { x: number; size: number; fontFamily: string; bold: boolean; width: number; height: number }, text: string, info: PageInfo) => {
+const layoutTextBox = (style: { x: number; size: number; fontFamily: string; bold: boolean; width: number; height: number; lineHeight?: number; letterSpacing?: number; fitMode?: "auto" | "shrink" | "overflow" }, text: string, info: PageInfo) => {
   const factor = style.fontFamily.toLowerCase().includes("mono") || style.fontFamily.toLowerCase().includes("courier") ? 0.62 : style.fontFamily.toLowerCase().includes("serif") || style.fontFamily.toLowerCase().includes("times") ? 0.52 : 0.56;
-  const characterWidth = style.size * (factor + (style.bold ? 0.03 : 0)); const availablePoints = Math.max(24, (0.98 - style.x) * info.width);
+  const characterWidth = style.size * (factor + (style.bold ? 0.03 : 0)) + (style.letterSpacing ?? 0); const availablePoints = Math.max(24, (0.98 - style.x) * info.width);
   const paragraphs = text.split(/\r?\n/); let visualLines = 0; let longestPoints = 0;
   for (const paragraph of paragraphs) {
     const words = paragraph.split(/(\s+)/); let linePoints = 0; let paragraphLines = 1;
     for (const word of words) {
       const wordPoints = word.length * characterWidth;
-      if (linePoints > 0 && linePoints + wordPoints > availablePoints) { longestPoints = Math.max(longestPoints, linePoints); linePoints = wordPoints; paragraphLines += 1; }
+      if (style.fitMode !== "overflow" && style.fitMode !== "shrink" && linePoints > 0 && linePoints + wordPoints > availablePoints) { longestPoints = Math.max(longestPoints, linePoints); linePoints = wordPoints; paragraphLines += 1; }
       else linePoints += wordPoints;
     }
     longestPoints = Math.max(longestPoints, linePoints); visualLines += paragraphLines;
   }
-  const width = Math.min(0.98 - style.x, Math.max(style.width, Math.min(availablePoints, longestPoints + style.size) / info.width));
-  const height = Math.max(style.height, visualLines * style.size * 1.28 / info.height);
+  const width = style.fitMode === "shrink" || style.fitMode === "overflow" ? style.width : Math.min(0.98 - style.x, Math.max(style.width, Math.min(availablePoints, longestPoints + style.size) / info.width));
+  const height = Math.max(style.height, visualLines * style.size * (style.lineHeight ?? 1.2) / info.height);
   return { width: Math.max(0.03, width), height: Math.max(0.02, height) };
+};
+const fittedFontSize = (style: { size: number; fontFamily: string; bold: boolean; width: number; letterSpacing?: number; fitMode?: string }, text: string, info: PageInfo) => {
+  if (style.fitMode !== "shrink") return style.size;
+  const factor = style.fontFamily.toLowerCase().includes("mono") ? 0.62 : style.fontFamily.toLowerCase().includes("serif") || style.fontFamily.toLowerCase().includes("times") ? 0.52 : 0.56;
+  const longest = Math.max(...text.split(/\r?\n/).map((line) => line.length), 1);
+  const natural = longest * style.size * (factor + (style.bold ? 0.03 : 0)) + Math.max(0, longest - 1) * (style.letterSpacing ?? 0);
+  return natural > style.width * info.width ? Math.max(6, style.size * style.width * info.width / natural) : style.size;
 };
 const withTimeout = <T,>(promise: Promise<T>, milliseconds: number, message: string) => new Promise<T>((resolve, reject) => {
   const timer = window.setTimeout(() => reject(new Error(message)), milliseconds);
@@ -54,6 +61,17 @@ function FontSizeInput({ value, onCommit }: { value: number; onCommit: (value: n
   return <input className="numberInput" aria-label="Font size" inputMode="decimal" value={draft} onChange={(event) => setDraft(event.target.value)} onBlur={commit} onKeyDown={(event) => { if (event.key === "Enter") { commit(); event.currentTarget.blur(); } }} />;
 }
 
+function CompactNumberInput({ label, value, min, max, onCommit }: { label: string; value: number; min: number; max: number; onCommit: (value: number) => void }) {
+  const [draft, setDraft] = useState(String(value));
+  useEffect(() => setDraft(String(value)), [value]);
+  const commit = () => {
+    const parsed = Number(draft);
+    if (!Number.isFinite(parsed)) { setDraft(String(value)); return; }
+    const next = Math.min(max, Math.max(min, parsed)); setDraft(String(next)); onCommit(next);
+  };
+  return <input className="numberInput" aria-label={label} inputMode="decimal" value={draft} onChange={(event) => setDraft(event.target.value)} onBlur={commit} onKeyDown={(event) => { if (event.key === "Enter") { commit(); event.currentTarget.blur(); } }} />;
+}
+
 export function App() {
   const engine = useRef<ReturnType<typeof createPdfEngine> | null>(null);
   const imageInput = useRef<HTMLInputElement>(null);
@@ -64,6 +82,12 @@ export function App() {
   const [open, setOpen] = useState<OpenDoc | null>(null);
   const [showProperties, setShowProperties] = useState(false);
   const [showForms, setShowForms] = useState(false);
+  const [showFind, setShowFind] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
+  const [replaceQuery, setReplaceQuery] = useState("");
+  const [matchCase, setMatchCase] = useState(false);
+  const [findResults, setFindResults] = useState<{ sourcePage: number; line: PositionedTextLine }[]>([]);
+  const [searching, setSearching] = useState(false);
   const [metadataDraft, setMetadataDraft] = useState<PdfMetadata>({ title: "", author: "", subject: "", keywords: "" });
   const [recent, setRecent] = useState<ProjectSummary[]>([]);
   const [image, setImage] = useState<string | null>(null);
@@ -257,11 +281,12 @@ export function App() {
     void registerBackHandler(() => {
       if (showProperties) { setShowProperties(false); return true; }
       if (showForms) { setShowForms(false); return true; }
+      if (showFind) { setShowFind(false); return true; }
       if (open) { open.urls.forEach((url) => URL.revokeObjectURL(url)); setOpen(null); setImage(null); void refreshRecent(); return true; }
       return false;
     }).then((cleanup) => { dispose = cleanup; });
     return () => dispose();
-  }, [open, refreshRecent, showForms, showProperties]);
+  }, [open, refreshRecent, showFind, showForms, showProperties]);
 
   const download = async () => {
     if (!open) return;
@@ -305,30 +330,85 @@ export function App() {
     setTool("select");
   };
 
-  const commitOriginalTextEdit = (edit: { line: PositionedTextLine; draft: string }, selectReplacement: boolean) => {
-    if (!open) return;
-    const { line, draft } = edit;
+  const buildReplacementOverlays = (line: PositionedTextLine, draft: string, source: number) => {
+    if (!open) return [] as Overlay[];
     const padding = 0.002;
     const erase: Overlay = {
-      id: crypto.randomUUID(), page: sourcePage, kind: "redact",
-      x: Math.max(0, line.x - padding), y: Math.max(0, line.y - padding),
-      width: Math.min(1 - Math.max(0, line.x - padding), line.width + padding * 2),
+      id: crypto.randomUUID(), page: source, kind: "redact",
+      x: line.x, y: Math.max(0, line.y - padding),
+      width: line.width,
       height: Math.min(1 - Math.max(0, line.y - padding), line.height + padding * 2),
       color: "#ffffff",
     };
     const replacements: Overlay[] = [erase];
     if (draft.length > 0) {
-      const box = layoutTextBox(line, draft, open.pages[sourcePage]!);
+      const box = layoutTextBox(line, draft, open.pages[source]!);
       replacements.push({
-      id: crypto.randomUUID(), page: sourcePage, kind: "text", x: line.x, y: line.y, width: box.width, height: box.height, text: draft,
+      id: crypto.randomUUID(), page: source, kind: "text", x: line.x, y: line.y, width: box.width, height: box.height, text: draft,
       size: line.size, color: line.color, fontFamily: line.fontFamily, fontName: line.fontName || null, bold: line.bold, italic: line.italic, underline: false,
+      alignment: line.alignment, lineHeight: line.lineHeight, letterSpacing: line.letterSpacing, fitMode: line.fitMode,
       });
     }
+    return replacements;
+  };
+  const buildMixedLineOverlays = (line: PositionedTextLine, draft: string) => {
+    if (!open) return null;
+    const runs = textLines.filter((candidate) => Math.abs(candidate.y - line.y) < 0.003).sort((a, b) => a.x - b.x);
+    if (runs.length < 2) return null;
+    const startX = Math.min(...runs.map((run) => run.x)); const startY = Math.min(...runs.map((run) => run.y));
+    const right = Math.max(...runs.map((run) => run.x + run.width)); const bottom = Math.max(...runs.map((run) => run.y + run.height));
+    const overlays: Overlay[] = [{ id: crypto.randomUUID(), page: sourcePage, kind: "redact", x: startX, y: Math.max(0, startY - 0.002), width: right - startX, height: bottom - startY + 0.004, color: "#ffffff" }];
+    let cursorX = startX; let cursorY = startY; let selectedOverlayId: string | null = null;
+    for (const run of runs) {
+      const text = run.id === line.id ? draft : run.text;
+      if (!text) continue;
+      const base = { ...run, x: cursorX, width: run.id === line.id ? 0.03 : run.width, fitMode: "auto" as const };
+      let box = layoutTextBox(base, text, open.pages[sourcePage]!);
+      if (cursorX > startX && cursorX + box.width > 0.98) { cursorX = startX; cursorY += Math.max(...runs.map((item) => item.height)) * 1.15; box = layoutTextBox({ ...base, x: cursorX }, text, open.pages[sourcePage]!); }
+      const id = crypto.randomUUID();
+      overlays.push({ id, page: sourcePage, kind: "text", x: cursorX, y: cursorY, width: box.width, height: box.height, text, size: run.size, color: run.color, fontFamily: run.fontFamily, fontName: run.fontName || null, bold: run.bold, italic: run.italic, underline: false, alignment: "left", lineHeight: run.lineHeight, letterSpacing: run.letterSpacing, fitMode: "auto" });
+      if (run.id === line.id) selectedOverlayId = id;
+      if (box.height > run.height * 1.5) { cursorX = startX; cursorY += box.height; } else cursorX += box.width;
+    }
+    return { overlays, selectedOverlayId };
+  };
+  const commitOriginalTextEdit = (edit: { line: PositionedTextLine; draft: string }, selectReplacement: boolean) => {
+    const mixed = buildMixedLineOverlays(edit.line, edit.draft);
+    const replacements = mixed?.overlays ?? buildReplacementOverlays(edit.line, edit.draft, sourcePage);
+    if (!replacements.length) return;
     execute({ type: "addMany", overlays: replacements });
     setOriginalEdit(null);
-    setSelectedId(selectReplacement && replacements.at(-1)?.kind === "text" ? replacements.at(-1)!.id : null);
+    const replacementId = mixed?.selectedOverlayId ?? (replacements.at(-1)?.kind === "text" ? replacements.at(-1)!.id : null);
+    setSelectedId(selectReplacement ? replacementId : null);
   };
   const applyOriginalTextEdit = () => { if (originalEdit) commitOriginalTextEdit(originalEdit, true); };
+  const runFind = async () => {
+    if (!findQuery.trim() || !open) { setFindResults([]); return; }
+    setSearching(true); setError("");
+    try {
+      const needle = matchCase ? findQuery : findQuery.toLocaleLowerCase(); const results: { sourcePage: number; line: PositionedTextLine }[] = [];
+      for (const source of doc.pageOrder) {
+        const lines = await withTimeout(engine.current!.api.extractTextLines(source), 20_000, `Text search timed out on page ${source + 1}.`);
+        for (const line of lines) {
+          const haystack = matchCase ? line.text : line.text.toLocaleLowerCase();
+          if (haystack.includes(needle)) results.push({ sourcePage: source, line });
+        }
+      }
+      setFindResults(results);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Document search failed."); }
+    finally { setSearching(false); }
+  };
+  const replaceAllMatches = () => {
+    if (!findResults.length || !findQuery) return;
+    const escaped = findQuery.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); const expression = new RegExp(escaped, matchCase ? "g" : "gi"); const overlays: Overlay[] = [];
+    for (const result of findResults) {
+      const replacement = result.line.text.replace(expression, replaceQuery);
+      if (replacement !== result.line.text) overlays.push(...buildReplacementOverlays(result.line, replacement, result.sourcePage));
+    }
+    if (overlays.length) execute({ type: "addMany", overlays });
+    setNotice(`Replaced ${findResults.length} text ${findResults.length === 1 ? "run" : "runs"} across the document.`);
+    setFindResults([]); setShowFind(false);
+  };
 
   const mergePdf = async (file: File) => {
     if (!open) return;
@@ -404,12 +484,12 @@ export function App() {
       <aside className="rail"><div className="railTitle"><b>Pages</b><span>{doc.pageOrder.length}</span></div>{doc.pageOrder.map((source, index) => <div key={source} role="button" tabIndex={0} className={index === page ? "thumb active" : "thumb"} onClick={() => setPage(index)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") setPage(index); }}><span>{index + 1}</span><div className="thumbPreview">Page {source + 1}</div><span className="pageActions"><button aria-label={`Move page ${index + 1} up`} disabled={index === 0} onClick={(event) => { event.stopPropagation(); movePage(index, -1); }}><ArrowUp /></button><button aria-label={`Move page ${index + 1} down`} disabled={index === doc.pageOrder.length - 1} onClick={(event) => { event.stopPropagation(); movePage(index, 1); }}><ArrowDown /></button><button aria-label={`Delete page ${index + 1}`} onClick={(event) => { event.stopPropagation(); removePage(index); }}><Trash2 /></button></span></div>)}</aside>
       <main className="canvasArea">
         <div className="toolRegion">
-          <nav className="tools" aria-label="Editing tools">{tools.map(({ id, label, Icon }) => <button key={id} className={tool === id ? "chosen" : ""} aria-pressed={tool === id} onClick={() => { setTool(id); if (id !== "select") { setSelectedId(null); setOriginalEdit(null); } else setNotice(textLines.length ? "Tap existing PDF text to edit it, or tap an added object to move or resize it." : "No selectable text was found on this page. It may be a scanned image; use Add text until OCR is available."); }}><Icon /><span>{label}</span></button>)}<span className="divide" /><button onClick={() => imageInput.current?.click()}><FileImage /><span>Image</span></button><input ref={imageInput} hidden type="file" accept="image/png,image/jpeg" onChange={(event) => { const file = event.target.files?.[0]; if (file) void addImage(file); event.target.value = ""; }} /><button onClick={() => execute({ type: "rotate", page: sourcePage, before: doc.rotations[sourcePage] ?? 0, after: (doc.rotations[sourcePage] ?? 0) + 90 })}><RotateCw /><span>Rotate</span></button><button onClick={() => mergeInput.current?.click()}><Merge /><span>Merge</span></button><input ref={mergeInput} hidden type="file" accept="application/pdf,.pdf" onChange={(event) => { const file = event.target.files?.[0]; if (file) void mergePdf(file); event.target.value = ""; }} /><button onClick={() => void splitCurrentPage()}><Scissors /><span>Split</span></button><button onClick={() => { setMetadataDraft(doc.metadata); setShowProperties(true); }}><Info /><span>Properties</span></button><button title={open.formFields.length ? "Edit interactive PDF fields" : "No interactive form fields detected"} onClick={() => open.formFields.length ? setShowForms(true) : setNotice("This PDF has no interactive form fields.")}><ListChecks /><span>Forms</span></button></nav>
+          <nav className="tools" aria-label="Editing tools">{tools.map(({ id, label, Icon }) => <button key={id} className={tool === id ? "chosen" : ""} aria-pressed={tool === id} onClick={() => { setTool(id); if (id !== "select") { setSelectedId(null); setOriginalEdit(null); } else setNotice(textLines.length ? "Tap existing PDF text to edit it, or tap an added object to move or resize it." : "No selectable text was found on this page. It may be a scanned image; use Add text until OCR is available."); }}><Icon /><span>{label}</span></button>)}<span className="divide" /><button onClick={() => imageInput.current?.click()}><FileImage /><span>Image</span></button><input ref={imageInput} hidden type="file" accept="image/png,image/jpeg" onChange={(event) => { const file = event.target.files?.[0]; if (file) void addImage(file); event.target.value = ""; }} /><button onClick={() => execute({ type: "rotate", page: sourcePage, before: doc.rotations[sourcePage] ?? 0, after: (doc.rotations[sourcePage] ?? 0) + 90 })}><RotateCw /><span>Rotate</span></button><button onClick={() => mergeInput.current?.click()}><Merge /><span>Merge</span></button><input ref={mergeInput} hidden type="file" accept="application/pdf,.pdf" onChange={(event) => { const file = event.target.files?.[0]; if (file) void mergePdf(file); event.target.value = ""; }} /><button onClick={() => void splitCurrentPage()}><Scissors /><span>Split</span></button><button onClick={() => { setMetadataDraft(doc.metadata); setShowProperties(true); }}><Info /><span>Properties</span></button><button title={open.formFields.length ? "Edit interactive PDF fields" : "No interactive form fields detected"} onClick={() => open.formFields.length ? setShowForms(true) : setNotice("This PDF has no interactive form fields.")}><ListChecks /><span>Forms</span></button><button onClick={() => { setFindResults([]); setShowFind(true); }}><Search /><span>Find</span></button></nav>
           {(tool === "shape" || tool === "ink" || tool === "signature" || selected || originalEdit) && <div className="contextBar">
             {tool === "shape" && <label>Shape<select value={shapeKind} onChange={(event) => setShapeKind(event.target.value as ShapeKind)}><option value="rectangle">Rectangle</option><option value="square">Square</option><option value="circle">Circle</option><option value="triangle">Triangle</option></select></label>}
             {(tool === "shape" || tool === "ink" || tool === "signature") && <label>Colour<input aria-label="Drawing colour" type="color" value={drawColor} onChange={(event) => setDrawColor(event.target.value)} /></label>}
-            {originalEdit && <><span className="editingLabel">Original text</span><label>Font<select value={originalEdit.line.fontName || originalEdit.line.fontFamily} onChange={(event) => setOriginalEdit({ ...originalEdit, line: { ...originalEdit.line, fontName: event.target.value, fontFamily: event.target.value } })}>{fontOptions.map((font) => <option key={font}>{font}</option>)}</select></label><label>Size<FontSizeInput value={originalEdit.line.size} onCommit={(size) => setOriginalEdit({ ...originalEdit, line: { ...originalEdit.line, size } })} /></label><button aria-label="Bold" className={originalEdit.line.bold ? "active" : ""} onClick={() => setOriginalEdit({ ...originalEdit, line: { ...originalEdit.line, bold: !originalEdit.line.bold, fontName: "" } })}><Bold /></button><button aria-label="Italic" className={originalEdit.line.italic ? "active" : ""} onClick={() => setOriginalEdit({ ...originalEdit, line: { ...originalEdit.line, italic: !originalEdit.line.italic, fontName: "" } })}><Italic /></button><label>Colour<input type="color" value={originalEdit.line.color} onChange={(event) => setOriginalEdit({ ...originalEdit, line: { ...originalEdit.line, color: event.target.value } })} /></label><button className="primaryAction" onClick={applyOriginalTextEdit}>Apply</button><button onClick={() => setOriginalEdit({ ...originalEdit, draft: "" })}>Delete text</button><button onClick={() => setOriginalEdit(null)}>Cancel</button></>}
-            {selected?.kind === "text" && <><label>Text<input className="textInput" value={selected.text} onChange={(event) => { const box = layoutTextBox(selected, event.target.value, pageInfo); execute({ type: "updateOverlay", before: selected, after: { ...selected, text: event.target.value, ...box } }); }} /></label><label>Font<select value={selected.fontName || selected.fontFamily} onChange={(event) => execute({ type: "updateOverlay", before: selected, after: { ...selected, fontName: event.target.value, fontFamily: event.target.value } })}>{fontOptions.map((font) => <option key={font}>{font}</option>)}</select></label><label>Size<FontSizeInput value={selected.size} onCommit={(size) => { const next = { ...selected, size }; execute({ type: "updateOverlay", before: selected, after: { ...next, ...layoutTextBox(next, next.text, pageInfo) } }); }} /></label><button aria-label="Bold" className={selected.bold ? "active" : ""} onClick={() => { const next = { ...selected, bold: !selected.bold, fontName: null }; execute({ type: "updateOverlay", before: selected, after: { ...next, ...layoutTextBox(next, next.text, pageInfo) } }); }}><Bold /></button><button aria-label="Italic" className={selected.italic ? "active" : ""} onClick={() => execute({ type: "updateOverlay", before: selected, after: { ...selected, italic: !selected.italic, fontName: null } })}><Italic /></button><button aria-label="Underline" className={selected.underline ? "active" : ""} onClick={() => execute({ type: "updateOverlay", before: selected, after: { ...selected, underline: !selected.underline } })}><Underline /></button><label>Colour<input type="color" value={selected.color} onChange={(event) => execute({ type: "updateOverlay", before: selected, after: { ...selected, color: event.target.value } })} /></label></>}
+            {originalEdit && <><span className="editingLabel">Original text</span><label>Font<select value={originalEdit.line.fontName || originalEdit.line.fontFamily} onChange={(event) => setOriginalEdit({ ...originalEdit, line: { ...originalEdit.line, fontName: event.target.value, fontFamily: event.target.value } })}>{fontOptions.map((font) => <option key={font}>{font}</option>)}</select></label><label>Size<FontSizeInput value={originalEdit.line.size} onCommit={(size) => setOriginalEdit({ ...originalEdit, line: { ...originalEdit.line, size } })} /></label><button aria-label="Bold" className={originalEdit.line.bold ? "active" : ""} onClick={() => setOriginalEdit({ ...originalEdit, line: { ...originalEdit.line, bold: !originalEdit.line.bold, fontName: "" } })}><Bold /></button><button aria-label="Italic" className={originalEdit.line.italic ? "active" : ""} onClick={() => setOriginalEdit({ ...originalEdit, line: { ...originalEdit.line, italic: !originalEdit.line.italic, fontName: "" } })}><Italic /></button><label>Align<select value={originalEdit.line.alignment} onChange={(event) => setOriginalEdit({ ...originalEdit, line: { ...originalEdit.line, alignment: event.target.value as PositionedTextLine["alignment"] } })}><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option><option value="justify">Justify</option></select></label><label>Line<CompactNumberInput label="Line spacing" value={originalEdit.line.lineHeight} min={0.8} max={3} onCommit={(lineHeight) => setOriginalEdit({ ...originalEdit, line: { ...originalEdit.line, lineHeight } })} /></label><label>Letter<CompactNumberInput label="Character spacing" value={originalEdit.line.letterSpacing} min={-5} max={20} onCommit={(letterSpacing) => setOriginalEdit({ ...originalEdit, line: { ...originalEdit.line, letterSpacing } })} /></label><label>Fit<select value={originalEdit.line.fitMode} onChange={(event) => setOriginalEdit({ ...originalEdit, line: { ...originalEdit.line, fitMode: event.target.value as PositionedTextLine["fitMode"] } })}><option value="auto">Reflow</option><option value="shrink">Shrink</option><option value="overflow">Overflow</option></select></label><label>Colour<input type="color" value={originalEdit.line.color} onChange={(event) => setOriginalEdit({ ...originalEdit, line: { ...originalEdit.line, color: event.target.value } })} /></label><button className="primaryAction" onClick={applyOriginalTextEdit}>Apply</button><button onClick={() => setOriginalEdit({ ...originalEdit, draft: "" })}>Delete text</button><button onClick={() => setOriginalEdit(null)}>Cancel</button></>}
+            {selected?.kind === "text" && <><label>Text<input className="textInput" value={selected.text} onChange={(event) => { const box = layoutTextBox(selected, event.target.value, pageInfo); execute({ type: "updateOverlay", before: selected, after: { ...selected, text: event.target.value, ...box } }); }} /></label><label>Font<select value={selected.fontName || selected.fontFamily} onChange={(event) => execute({ type: "updateOverlay", before: selected, after: { ...selected, fontName: event.target.value, fontFamily: event.target.value } })}>{fontOptions.map((font) => <option key={font}>{font}</option>)}</select></label><label>Size<FontSizeInput value={selected.size} onCommit={(size) => { const next = { ...selected, size }; execute({ type: "updateOverlay", before: selected, after: { ...next, ...layoutTextBox(next, next.text, pageInfo) } }); }} /></label><button aria-label="Bold" className={selected.bold ? "active" : ""} onClick={() => { const next = { ...selected, bold: !selected.bold, fontName: null }; execute({ type: "updateOverlay", before: selected, after: { ...next, ...layoutTextBox(next, next.text, pageInfo) } }); }}><Bold /></button><button aria-label="Italic" className={selected.italic ? "active" : ""} onClick={() => execute({ type: "updateOverlay", before: selected, after: { ...selected, italic: !selected.italic, fontName: null } })}><Italic /></button><button aria-label="Underline" className={selected.underline ? "active" : ""} onClick={() => execute({ type: "updateOverlay", before: selected, after: { ...selected, underline: !selected.underline } })}><Underline /></button><label>Align<select value={selected.alignment} onChange={(event) => execute({ type: "updateOverlay", before: selected, after: { ...selected, alignment: event.target.value as typeof selected.alignment } })}><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option><option value="justify">Justify</option></select></label><label>Line<CompactNumberInput label="Line spacing" value={selected.lineHeight} min={0.8} max={3} onCommit={(lineHeight) => execute({ type: "updateOverlay", before: selected, after: { ...selected, lineHeight } })} /></label><label>Letter<CompactNumberInput label="Character spacing" value={selected.letterSpacing} min={-5} max={20} onCommit={(letterSpacing) => execute({ type: "updateOverlay", before: selected, after: { ...selected, letterSpacing } })} /></label><label>Fit<select value={selected.fitMode} onChange={(event) => execute({ type: "updateOverlay", before: selected, after: { ...selected, fitMode: event.target.value as typeof selected.fitMode } })}><option value="auto">Reflow</option><option value="shrink">Shrink</option><option value="overflow">Overflow</option></select></label><label>Colour<input type="color" value={selected.color} onChange={(event) => execute({ type: "updateOverlay", before: selected, after: { ...selected, color: event.target.value } })} /></label></>}
             {selected && selected.kind !== "text" && "color" in selected && <label>Colour<input type="color" value={selected.color} onChange={(event) => execute({ type: "updateOverlay", before: selected, after: { ...selected, color: event.target.value } as Overlay })} /></label>}
             {selected && <button className="danger" onClick={() => { execute({ type: "remove", overlay: selected }); setSelectedId(null); }}><Trash2 /> Delete</button>}
           </div>}
@@ -420,6 +500,7 @@ export function App() {
     </div>
     {showProperties && <div className="modalBackdrop" role="presentation"><section className="modal" role="dialog" aria-modal="true" aria-label="Document properties"><header><h2>Document properties</h2><button aria-label="Close properties" onClick={() => setShowProperties(false)}><X /></button></header>{(["title", "author", "subject", "keywords"] as const).map((key) => <label key={key}>{key.charAt(0).toUpperCase() + key.slice(1)}<input value={metadataDraft[key]} onChange={(event) => setMetadataDraft({ ...metadataDraft, [key]: event.target.value })} /></label>)}<footer><button onClick={() => setShowProperties(false)}>Cancel</button><button className="primary" onClick={saveMetadata}>Save properties</button></footer></section></div>}
     {showForms && <div className="modalBackdrop" role="presentation"><section className="modal" role="dialog" aria-modal="true" aria-label="PDF form fields"><header><h2>Form fields</h2><button aria-label="Close forms" onClick={() => setShowForms(false)}><X /></button></header>{open.formFields.map((field) => <label key={`${field.page}-${field.name}`}>{field.label || field.name}<span>Page {field.page + 1}</span>{field.type === "choice" ? <select disabled={field.readOnly} value={doc.formValues[field.name] ?? field.value} onChange={(event) => execute({ type: "setFormValue", name: field.name, before: doc.formValues[field.name] ?? field.value, after: event.target.value })}>{field.options.map((option) => <option key={option}>{option}</option>)}</select> : field.type === "checkbox" || field.type === "radio" ? <input disabled={field.readOnly} type="checkbox" checked={(doc.formValues[field.name] ?? field.value) !== "Off"} onChange={(event) => execute({ type: "setFormValue", name: field.name, before: doc.formValues[field.name] ?? field.value, after: event.target.checked ? "Yes" : "Off" })} /> : <input disabled={field.readOnly} defaultValue={doc.formValues[field.name] ?? field.value} onBlur={(event) => execute({ type: "setFormValue", name: field.name, before: doc.formValues[field.name] ?? field.value, after: event.target.value })} />}</label>)}<footer><button className="primary" onClick={() => setShowForms(false)}>Done</button></footer></section></div>}
+    {showFind && <div className="modalBackdrop" role="presentation"><section className="modal findModal" role="dialog" aria-modal="true" aria-label="Find and replace"><header><h2>Find and replace</h2><button aria-label="Close find and replace" onClick={() => setShowFind(false)}><X /></button></header><label>Find<input autoFocus value={findQuery} onChange={(event) => setFindQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void runFind(); }} /></label><label>Replace with<input value={replaceQuery} onChange={(event) => setReplaceQuery(event.target.value)} /></label><label className="checkLabel"><input type="checkbox" checked={matchCase} onChange={(event) => setMatchCase(event.target.checked)} />Match case</label><div className="findSummary">{searching ? "Searching locally…" : `${findResults.length} matching text ${findResults.length === 1 ? "run" : "runs"}`}</div>{findResults.length > 0 && <div className="findResults">{findResults.slice(0, 100).map((result) => <button key={`${result.sourcePage}-${result.line.id}`} onClick={() => { const displayPage = doc.pageOrder.indexOf(result.sourcePage); if (displayPage >= 0) setPage(displayPage); setShowFind(false); }}><b>Page {doc.pageOrder.indexOf(result.sourcePage) + 1}</b><span>{result.line.text.trim()}</span></button>)}</div>}<footer><button onClick={() => setShowFind(false)}>Cancel</button><button onClick={() => void runFind()} disabled={searching || !findQuery.trim()}>Find all</button><button className="primary" onClick={replaceAllMatches} disabled={!findResults.length}>Replace all</button></footer></section></div>}
     {error && <div className="toast" role="alert">{error}</div>}{notice && <div className="toast success" role="status">{notice}</div>}
   </div>;
 }
@@ -462,7 +543,7 @@ function PageCanvas({ image, info, zoom, rotation, overlays, textLines, original
       if (text) {
         const base = { x: start.current.x, size: 18, fontFamily: "Helvetica", bold: false, width: 0.18, height: 0.035 };
         const box = layoutTextBox(base, text, info);
-        onAdd({ id: crypto.randomUUID(), page, kind: "text", x: start.current.x, y: start.current.y, width: box.width, height: box.height, text, size: 18, color: drawColor, fontFamily: "Helvetica", fontName: "Helvetica", bold: false, italic: false, underline: false });
+        onAdd({ id: crypto.randomUUID(), page, kind: "text", x: start.current.x, y: start.current.y, width: box.width, height: box.height, text, size: 18, color: drawColor, fontFamily: "Helvetica", fontName: "Helvetica", bold: false, italic: false, underline: false, alignment: "left", lineHeight: 1.2, letterSpacing: 0, fitMode: "auto" });
       }
       start.current = null;
       setLivePoints([]);
@@ -527,9 +608,9 @@ function PageCanvas({ image, info, zoom, rotation, overlays, textLines, original
       {liveRect && tool === "crop" && <rect className="cropRect" x={liveRect.x} y={liveRect.y} width={liveRect.width} height={liveRect.height} />}
       {crop && <rect className="cropRect" x={crop.x} y={crop.y} width={crop.width} height={crop.height} />}
     </svg>
-    {shown.filter((overlay): overlay is Extract<Overlay, { kind: "text" }> => overlay.kind === "text").map((overlay) => <span key={overlay.id} className="textOverlay" style={{ left: `${overlay.x * 100}%`, top: `${overlay.y * 100}%`, width: `${overlay.width * 100}%`, height: `${overlay.height * 100}%`, fontSize: overlay.size * zoom, color: overlay.color, fontFamily: fontStack(overlay.fontName, overlay.fontFamily), fontWeight: overlay.bold ? 700 : 400, fontStyle: overlay.italic ? "italic" : "normal", textDecoration: overlay.underline ? "underline" : "none" }}>{overlay.text}</span>)}
+    {shown.filter((overlay): overlay is Extract<Overlay, { kind: "text" }> => overlay.kind === "text").map((overlay) => <span key={overlay.id} className="textOverlay" style={{ left: `${overlay.x * 100}%`, top: `${overlay.y * 100}%`, width: `${overlay.width * 100}%`, height: `${overlay.height * 100}%`, fontSize: fittedFontSize(overlay, overlay.text, info) * zoom, color: overlay.color, fontFamily: fontStack(overlay.fontName, overlay.fontFamily), fontWeight: overlay.bold ? 700 : 400, fontStyle: overlay.italic ? "italic" : "normal", textDecoration: overlay.underline ? "underline" : "none", textAlign: overlay.alignment, lineHeight: overlay.lineHeight, letterSpacing: overlay.letterSpacing * zoom }}>{overlay.text}</span>)}
     {tool === "select" && textLines.filter((line) => !lineWasReplaced(line)).map((line) => <button key={line.id} className={`originalTextHit ${originalEdit?.line.id === line.id ? "selected" : ""}`} aria-label={`Edit PDF text: ${line.text.trim().slice(0, 80)}`} style={{ left: `${line.x * 100}%`, top: `${line.y * 100}%`, width: `${line.width * 100}%`, height: `${line.height * 100}%` }} onPointerDown={(event) => { event.stopPropagation(); onOriginalSelect(line); }} />)}
-    {originalEdit && editorBox && <textarea autoFocus className="originalTextEditor" aria-label="Edit original PDF text" value={originalEdit.draft} style={{ left: `${originalEdit.line.x * 100}%`, top: `${originalEdit.line.y * 100}%`, width: `${editorBox.width * 100}%`, height: `${editorBox.height * 100}%`, fontSize: originalEdit.line.size * zoom, color: originalEdit.line.color, fontFamily: fontStack(originalEdit.line.fontName, originalEdit.line.fontFamily), fontWeight: originalEdit.line.bold ? 700 : 400, fontStyle: originalEdit.line.italic ? "italic" : "normal" }} onPointerDown={(event) => event.stopPropagation()} onChange={(event) => onOriginalChange(event.target.value)} />}
+    {originalEdit && editorBox && <textarea autoFocus className="originalTextEditor" aria-label="Edit original PDF text" value={originalEdit.draft} style={{ left: `${originalEdit.line.x * 100}%`, top: `${originalEdit.line.y * 100}%`, width: `${editorBox.width * 100}%`, height: `${editorBox.height * 100}%`, fontSize: fittedFontSize(originalEdit.line, originalEdit.draft, info) * zoom, color: originalEdit.line.color, fontFamily: fontStack(originalEdit.line.fontName, originalEdit.line.fontFamily), fontWeight: originalEdit.line.bold ? 700 : 400, fontStyle: originalEdit.line.italic ? "italic" : "normal", textAlign: originalEdit.line.alignment, lineHeight: originalEdit.line.lineHeight, letterSpacing: originalEdit.line.letterSpacing * zoom }} onPointerDown={(event) => event.stopPropagation()} onChange={(event) => onOriginalChange(event.target.value)} />}
     {tool === "select" && shown.map((overlay) => { const bounds = boundsOf(overlay); const selected = selectedId === overlay.id; return <div key={`hit-${overlay.id}`} className={`objectBox ${selected ? "selected" : ""}`} style={{ left: `${bounds.x * 100}%`, top: `${bounds.y * 100}%`, width: `${bounds.width * 100}%`, height: `${bounds.height * 100}%` }} onPointerDown={(event) => objectDown(event, overlay, "move")}>{selected && <button className="resizeHandle" aria-label="Resize selected object" onPointerDown={(event) => objectDown(event, overlay, "resize")} />}</div>; })}
   </div></div>;
 }
