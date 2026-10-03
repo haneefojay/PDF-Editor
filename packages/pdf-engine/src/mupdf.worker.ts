@@ -89,7 +89,18 @@ const appendTextContent = async (doc: Mupdf.PDFDocument, page: Mupdf.PDFPage, ov
   fonts.resolve().put(resourceName, fontReference);
   const [red, green, blue] = toColor(overlay.color) as [number, number, number];
   const x = bounds[0] + overlay.x * width; const top = bounds[1] + overlay.y * height;
-  const lines = overlay.text.split(/\r?\n/); const commands = ["q", "BT", `/${resourceName} ${overlay.size} Tf`, `${red} ${green} ${blue} rg`];
+  const widthFactor = category === "mono" ? 0.62 : category === "serif" ? 0.52 : 0.56; const maxCharacters = Math.max(1, Math.floor(overlay.width * width / (overlay.size * (widthFactor + (overlay.bold ? 0.03 : 0)))));
+  const lines = overlay.text.split(/\r?\n/).flatMap((paragraph) => {
+    if (paragraph.length <= maxCharacters) return [paragraph];
+    const output: string[] = []; let current = "";
+    for (const word of paragraph.split(/(\s+)/)) {
+      if (current && current.length + word.length > maxCharacters) { output.push(current.trimEnd()); current = word.trimStart(); }
+      else current += word;
+      while (current.length > maxCharacters) { output.push(current.slice(0, maxCharacters)); current = current.slice(maxCharacters); }
+    }
+    output.push(current); return output;
+  });
+  const commands = ["q", "BT", `/${resourceName} ${overlay.size} Tf`, `${red} ${green} ${blue} rg`];
   lines.forEach((line, index) => {
     const encoded = Array.from(line, (character) => { const code = character.codePointAt(0) ?? 63; return code > 0 && code <= 255 ? code : 63; });
     const hex = encoded.map((code) => code.toString(16).padStart(2, "0")).join("");
@@ -150,18 +161,23 @@ class Engine implements PdfWorkerApi {
     const page = this.doc.loadPage(index); const bounds = page.getBounds(); const pageWidth = bounds[2] - bounds[0]; const pageHeight = bounds[3] - bounds[1];
     const structured = page.toStructuredText("preserve-whitespace");
     const lines: PositionedTextLine[] = [];
-    let current: { bbox: Mupdf.Rect; text: string; size: number; color: string; fontName: string } | null = null;
+    type StyleSample = { count: number; size: number; color: string; fontName: string };
+    let current: { bbox: Mupdf.Rect; text: string; styles: Map<string, StyleSample> } | null = null;
     structured.walk({
-      beginLine: (bbox) => { current = { bbox, text: "", size: 12, color: "#171714", fontName: "Helvetica" }; },
+      beginLine: (bbox) => { current = { bbox, text: "", styles: new Map() }; },
       onChar: (char, _origin, font, size, _quad, color) => {
         if (!current) return;
         current.text += char;
-        if (!current.fontName || current.text.length === 1) { current.fontName = font.getName(); current.size = size; current.color = extractedColor(color); }
+        if (!char.trim()) return;
+        const fontName = font.getName(); const hex = extractedColor(color); const key = `${fontName}\u0000${Math.round(size * 100) / 100}\u0000${hex}`;
+        const sample = current.styles.get(key);
+        if (sample) sample.count += 1; else current.styles.set(key, { count: 1, size, color: hex, fontName });
       },
       endLine: () => {
         if (!current || !current.text.trim()) { current = null; return; }
-        const font = extractedFont(current.fontName); const [x0, y0, x1, y1] = current.bbox;
-        lines.push({ id: `${index}-${lines.length}`, text: current.text, x: (x0 - bounds[0]) / pageWidth, y: (y0 - bounds[1]) / pageHeight, width: Math.max(0.005, (x1 - x0) / pageWidth), height: Math.max(0.005, (y1 - y0) / pageHeight), size: current.size, color: current.color, ...font });
+        const dominant = [...current.styles.values()].sort((a, b) => b.count - a.count)[0] ?? { count: 1, size: 12, color: "#171714", fontName: "Helvetica" };
+        const font = extractedFont(dominant.fontName); const [x0, y0, x1, y1] = current.bbox;
+        lines.push({ id: `${index}-${lines.length}`, text: current.text, x: (x0 - bounds[0]) / pageWidth, y: (y0 - bounds[1]) / pageHeight, width: Math.max(0.005, (x1 - x0) / pageWidth), height: Math.max(0.005, (y1 - y0) / pageHeight), size: dominant.size, color: dominant.color, ...font });
         current = null;
       },
     });

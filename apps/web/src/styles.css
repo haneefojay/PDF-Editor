@@ -9,3 +9,4 @@
 .contextBar .textInput{width:150px}
 .originalTextHit{position:absolute;z-index:5;border:1px solid transparent;background:transparent;padding:0;cursor:text;touch-action:manipulation}.originalTextHit:hover,.originalTextHit.selected{border-color:#2f6fed;background:#2f6fed14}.originalTextEditor{position:absolute;z-index:7;margin:0;padding:1px 3px;border:2px solid #2f6fed;border-radius:3px;background:#fff;line-height:1.1;resize:both;overflow:auto;user-select:text;touch-action:manipulation;box-shadow:0 2px 8px #0003}.contextBar .editingLabel{font-size:11px;font-weight:700;white-space:nowrap}.contextBar .primaryAction{background:#171714;color:#fff}
 .stage{touch-action:pan-x pan-y}.contextBar select{max-width:190px}.numberInput{text-align:center}
+.textOverlay{overflow:visible}.originalTextEditor{overflow:hidden;resize:none}

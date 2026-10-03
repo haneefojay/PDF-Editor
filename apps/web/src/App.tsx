@@ -20,6 +20,23 @@ type OpenDoc = { id: string; name: string; bytes: ArrayBuffer; pages: PageInfo[]
 type ShapeKind = "rectangle" | "square" | "circle" | "triangle";
 const commonFonts = ["Arial", "Helvetica", "Calibri", "Cambria", "Times New Roman", "Georgia", "Garamond", "Verdana", "Tahoma", "Trebuchet MS", "Courier New", "Noto Sans", "Noto Serif"];
 const fontStack = (fontName: string | null | undefined, family: string) => `"${(fontName || family).replaceAll('"', "")}","${family.replaceAll('"', "")}",Arial,sans-serif`;
+const layoutTextBox = (style: { x: number; size: number; fontFamily: string; bold: boolean; width: number; height: number }, text: string, info: PageInfo) => {
+  const factor = style.fontFamily.toLowerCase().includes("mono") || style.fontFamily.toLowerCase().includes("courier") ? 0.62 : style.fontFamily.toLowerCase().includes("serif") || style.fontFamily.toLowerCase().includes("times") ? 0.52 : 0.56;
+  const characterWidth = style.size * (factor + (style.bold ? 0.03 : 0)); const availablePoints = Math.max(24, (0.98 - style.x) * info.width);
+  const paragraphs = text.split(/\r?\n/); let visualLines = 0; let longestPoints = 0;
+  for (const paragraph of paragraphs) {
+    const words = paragraph.split(/(\s+)/); let linePoints = 0; let paragraphLines = 1;
+    for (const word of words) {
+      const wordPoints = word.length * characterWidth;
+      if (linePoints > 0 && linePoints + wordPoints > availablePoints) { longestPoints = Math.max(longestPoints, linePoints); linePoints = wordPoints; paragraphLines += 1; }
+      else linePoints += wordPoints;
+    }
+    longestPoints = Math.max(longestPoints, linePoints); visualLines += paragraphLines;
+  }
+  const width = Math.min(0.98 - style.x, Math.max(style.width, Math.min(availablePoints, longestPoints + style.size) / info.width));
+  const height = Math.max(style.height, visualLines * style.size * 1.28 / info.height);
+  return { width: Math.max(0.03, width), height: Math.max(0.02, height) };
+};
 const withTimeout = <T,>(promise: Promise<T>, milliseconds: number, message: string) => new Promise<T>((resolve, reject) => {
   const timer = window.setTimeout(() => reject(new Error(message)), milliseconds);
   promise.then((value) => { window.clearTimeout(timer); resolve(value); }, (error) => { window.clearTimeout(timer); reject(error); });
@@ -288,9 +305,9 @@ export function App() {
     setTool("select");
   };
 
-  const applyOriginalTextEdit = () => {
-    if (!originalEdit) return;
-    const { line, draft } = originalEdit;
+  const commitOriginalTextEdit = (edit: { line: PositionedTextLine; draft: string }, selectReplacement: boolean) => {
+    if (!open) return;
+    const { line, draft } = edit;
     const padding = 0.002;
     const erase: Overlay = {
       id: crypto.randomUUID(), page: sourcePage, kind: "redact",
@@ -300,15 +317,18 @@ export function App() {
       color: "#ffffff",
     };
     const replacements: Overlay[] = [erase];
-    if (draft.length > 0) replacements.push({
-      id: crypto.randomUUID(), page: sourcePage, kind: "text", x: line.x, y: line.y,
-      width: Math.max(line.width, 0.05), height: Math.max(line.height, 0.02), text: draft,
+    if (draft.length > 0) {
+      const box = layoutTextBox(line, draft, open.pages[sourcePage]!);
+      replacements.push({
+      id: crypto.randomUUID(), page: sourcePage, kind: "text", x: line.x, y: line.y, width: box.width, height: box.height, text: draft,
       size: line.size, color: line.color, fontFamily: line.fontFamily, fontName: line.fontName || null, bold: line.bold, italic: line.italic, underline: false,
-    });
+      });
+    }
     execute({ type: "addMany", overlays: replacements });
     setOriginalEdit(null);
-    setSelectedId(replacements.at(-1)?.kind === "text" ? replacements.at(-1)!.id : null);
+    setSelectedId(selectReplacement && replacements.at(-1)?.kind === "text" ? replacements.at(-1)!.id : null);
   };
+  const applyOriginalTextEdit = () => { if (originalEdit) commitOriginalTextEdit(originalEdit, true); };
 
   const mergePdf = async (file: File) => {
     if (!open) return;
@@ -389,12 +409,12 @@ export function App() {
             {tool === "shape" && <label>Shape<select value={shapeKind} onChange={(event) => setShapeKind(event.target.value as ShapeKind)}><option value="rectangle">Rectangle</option><option value="square">Square</option><option value="circle">Circle</option><option value="triangle">Triangle</option></select></label>}
             {(tool === "shape" || tool === "ink" || tool === "signature") && <label>Colour<input aria-label="Drawing colour" type="color" value={drawColor} onChange={(event) => setDrawColor(event.target.value)} /></label>}
             {originalEdit && <><span className="editingLabel">Original text</span><label>Font<select value={originalEdit.line.fontName || originalEdit.line.fontFamily} onChange={(event) => setOriginalEdit({ ...originalEdit, line: { ...originalEdit.line, fontName: event.target.value, fontFamily: event.target.value } })}>{fontOptions.map((font) => <option key={font}>{font}</option>)}</select></label><label>Size<FontSizeInput value={originalEdit.line.size} onCommit={(size) => setOriginalEdit({ ...originalEdit, line: { ...originalEdit.line, size } })} /></label><button aria-label="Bold" className={originalEdit.line.bold ? "active" : ""} onClick={() => setOriginalEdit({ ...originalEdit, line: { ...originalEdit.line, bold: !originalEdit.line.bold, fontName: "" } })}><Bold /></button><button aria-label="Italic" className={originalEdit.line.italic ? "active" : ""} onClick={() => setOriginalEdit({ ...originalEdit, line: { ...originalEdit.line, italic: !originalEdit.line.italic, fontName: "" } })}><Italic /></button><label>Colour<input type="color" value={originalEdit.line.color} onChange={(event) => setOriginalEdit({ ...originalEdit, line: { ...originalEdit.line, color: event.target.value } })} /></label><button className="primaryAction" onClick={applyOriginalTextEdit}>Apply</button><button onClick={() => setOriginalEdit({ ...originalEdit, draft: "" })}>Delete text</button><button onClick={() => setOriginalEdit(null)}>Cancel</button></>}
-            {selected?.kind === "text" && <><label>Text<input className="textInput" value={selected.text} onChange={(event) => execute({ type: "updateOverlay", before: selected, after: { ...selected, text: event.target.value } })} /></label><label>Font<select value={selected.fontName || selected.fontFamily} onChange={(event) => execute({ type: "updateOverlay", before: selected, after: { ...selected, fontName: event.target.value, fontFamily: event.target.value } })}>{fontOptions.map((font) => <option key={font}>{font}</option>)}</select></label><label>Size<FontSizeInput value={selected.size} onCommit={(size) => execute({ type: "updateOverlay", before: selected, after: { ...selected, size } })} /></label><button aria-label="Bold" className={selected.bold ? "active" : ""} onClick={() => execute({ type: "updateOverlay", before: selected, after: { ...selected, bold: !selected.bold, fontName: null } })}><Bold /></button><button aria-label="Italic" className={selected.italic ? "active" : ""} onClick={() => execute({ type: "updateOverlay", before: selected, after: { ...selected, italic: !selected.italic, fontName: null } })}><Italic /></button><button aria-label="Underline" className={selected.underline ? "active" : ""} onClick={() => execute({ type: "updateOverlay", before: selected, after: { ...selected, underline: !selected.underline } })}><Underline /></button><label>Colour<input type="color" value={selected.color} onChange={(event) => execute({ type: "updateOverlay", before: selected, after: { ...selected, color: event.target.value } })} /></label></>}
+            {selected?.kind === "text" && <><label>Text<input className="textInput" value={selected.text} onChange={(event) => { const box = layoutTextBox(selected, event.target.value, pageInfo); execute({ type: "updateOverlay", before: selected, after: { ...selected, text: event.target.value, ...box } }); }} /></label><label>Font<select value={selected.fontName || selected.fontFamily} onChange={(event) => execute({ type: "updateOverlay", before: selected, after: { ...selected, fontName: event.target.value, fontFamily: event.target.value } })}>{fontOptions.map((font) => <option key={font}>{font}</option>)}</select></label><label>Size<FontSizeInput value={selected.size} onCommit={(size) => { const next = { ...selected, size }; execute({ type: "updateOverlay", before: selected, after: { ...next, ...layoutTextBox(next, next.text, pageInfo) } }); }} /></label><button aria-label="Bold" className={selected.bold ? "active" : ""} onClick={() => { const next = { ...selected, bold: !selected.bold, fontName: null }; execute({ type: "updateOverlay", before: selected, after: { ...next, ...layoutTextBox(next, next.text, pageInfo) } }); }}><Bold /></button><button aria-label="Italic" className={selected.italic ? "active" : ""} onClick={() => execute({ type: "updateOverlay", before: selected, after: { ...selected, italic: !selected.italic, fontName: null } })}><Italic /></button><button aria-label="Underline" className={selected.underline ? "active" : ""} onClick={() => execute({ type: "updateOverlay", before: selected, after: { ...selected, underline: !selected.underline } })}><Underline /></button><label>Colour<input type="color" value={selected.color} onChange={(event) => execute({ type: "updateOverlay", before: selected, after: { ...selected, color: event.target.value } })} /></label></>}
             {selected && selected.kind !== "text" && "color" in selected && <label>Colour<input type="color" value={selected.color} onChange={(event) => execute({ type: "updateOverlay", before: selected, after: { ...selected, color: event.target.value } as Overlay })} /></label>}
             {selected && <button className="danger" onClick={() => { execute({ type: "remove", overlay: selected }); setSelectedId(null); }}><Trash2 /> Delete</button>}
           </div>}
         </div>
-        <div ref={stageRef} className="stage" onTouchStart={beginPinch} onTouchMove={movePinch} onTouchEnd={endPinch} onTouchCancel={endPinch}>{busy && <div className="loading">Rendering page…</div>}<div className="pageViewport"><PageCanvas image={image} info={pageInfo} zoom={zoom} rotation={doc.rotations[sourcePage] ?? 0} overlays={current} textLines={textLines} originalEdit={originalEdit} crop={doc.crops[sourcePage]} tool={tool} shapeKind={shapeKind} drawColor={drawColor} selectedId={selectedId} onSelect={(id) => { setSelectedId(id); setOriginalEdit(null); }} onOriginalSelect={(line) => { setSelectedId(null); setOriginalEdit({ line, draft: line.text }); }} onOriginalChange={(draft) => setOriginalEdit((currentEdit) => currentEdit ? { ...currentEdit, draft } : null)} onAdd={(overlay) => { execute({ type: "add", overlay }); setSelectedId(overlay.id); if (overlay.kind === "text") setTool("select"); }} onUpdate={(before, after) => execute({ type: "updateOverlay", before, after })} onCrop={(crop) => execute({ type: "setCrop", page: sourcePage, before: doc.crops[sourcePage] ?? null, after: crop })} page={sourcePage} /></div></div>
+        <div ref={stageRef} className="stage" onTouchStart={beginPinch} onTouchMove={movePinch} onTouchEnd={endPinch} onTouchCancel={endPinch}>{busy && <div className="loading">Rendering page…</div>}<div className="pageViewport"><PageCanvas image={image} info={pageInfo} zoom={zoom} rotation={doc.rotations[sourcePage] ?? 0} overlays={current} textLines={textLines} originalEdit={originalEdit} crop={doc.crops[sourcePage]} tool={tool} shapeKind={shapeKind} drawColor={drawColor} selectedId={selectedId} onSelect={(id) => { if (originalEdit) commitOriginalTextEdit(originalEdit, false); setSelectedId(id); if (id || !originalEdit) setOriginalEdit(null); }} onOriginalSelect={(line) => { if (originalEdit) commitOriginalTextEdit(originalEdit, false); setSelectedId(null); setOriginalEdit({ line, draft: line.text }); }} onOriginalChange={(draft) => setOriginalEdit((currentEdit) => currentEdit ? { ...currentEdit, draft } : null)} onAdd={(overlay) => { execute({ type: "add", overlay }); setSelectedId(overlay.id); if (overlay.kind === "text") setTool("select"); }} onUpdate={(before, after) => execute({ type: "updateOverlay", before, after })} onCrop={(crop) => execute({ type: "setCrop", page: sourcePage, before: doc.crops[sourcePage] ?? null, after: crop })} page={sourcePage} /></div></div>
         <div className="status"><div><button onClick={() => setPage(Math.max(0, page - 1))} disabled={page === 0}><ChevronLeft /></button><span>{page + 1} / {doc.pageOrder.length}</span><button onClick={() => setPage(Math.min(doc.pageOrder.length - 1, page + 1))} disabled={page === doc.pageOrder.length - 1}><ChevronRight /></button></div><div><button aria-label="Zoom out" onClick={() => setZoom(zoom - 0.15)}><ZoomOut /></button><span>{Math.round(zoom * 100)}%</span><button aria-label="Zoom in" onClick={() => setZoom(zoom + 0.15)}><ZoomIn /></button></div></div>
       </main>
     </div>
@@ -439,7 +459,11 @@ function PageCanvas({ image, info, zoom, rotation, overlays, textLines, original
     setLiveRect(null);
     if (tool === "text") {
       const text = prompt("Text to add");
-      if (text) onAdd({ id: crypto.randomUUID(), page, kind: "text", x: start.current.x, y: start.current.y, width: 0.3, height: 0.07, text, size: 18, color: drawColor, fontFamily: "Helvetica", fontName: "Helvetica", bold: false, italic: false, underline: false });
+      if (text) {
+        const base = { x: start.current.x, size: 18, fontFamily: "Helvetica", bold: false, width: 0.18, height: 0.035 };
+        const box = layoutTextBox(base, text, info);
+        onAdd({ id: crypto.randomUUID(), page, kind: "text", x: start.current.x, y: start.current.y, width: box.width, height: box.height, text, size: 18, color: drawColor, fontFamily: "Helvetica", fontName: "Helvetica", bold: false, italic: false, underline: false });
+      }
       start.current = null;
       setLivePoints([]);
     }
@@ -484,6 +508,7 @@ function PageCanvas({ image, info, zoom, rotation, overlays, textLines, original
     setLiveRect(null);
   };
   const shown = overlays.map((overlay) => preview?.id === overlay.id ? preview : overlay);
+  const editorBox = originalEdit ? layoutTextBox(originalEdit.line, originalEdit.draft, info) : null;
   const objectDown = (event: ReactPointerEvent, overlay: Overlay, mode: "move" | "resize") => {
     if (tool !== "select") return;
     event.stopPropagation(); ref.current?.setPointerCapture(event.pointerId); onSelect(overlay.id);
@@ -504,7 +529,7 @@ function PageCanvas({ image, info, zoom, rotation, overlays, textLines, original
     </svg>
     {shown.filter((overlay): overlay is Extract<Overlay, { kind: "text" }> => overlay.kind === "text").map((overlay) => <span key={overlay.id} className="textOverlay" style={{ left: `${overlay.x * 100}%`, top: `${overlay.y * 100}%`, width: `${overlay.width * 100}%`, height: `${overlay.height * 100}%`, fontSize: overlay.size * zoom, color: overlay.color, fontFamily: fontStack(overlay.fontName, overlay.fontFamily), fontWeight: overlay.bold ? 700 : 400, fontStyle: overlay.italic ? "italic" : "normal", textDecoration: overlay.underline ? "underline" : "none" }}>{overlay.text}</span>)}
     {tool === "select" && textLines.filter((line) => !lineWasReplaced(line)).map((line) => <button key={line.id} className={`originalTextHit ${originalEdit?.line.id === line.id ? "selected" : ""}`} aria-label={`Edit PDF text: ${line.text.trim().slice(0, 80)}`} style={{ left: `${line.x * 100}%`, top: `${line.y * 100}%`, width: `${line.width * 100}%`, height: `${line.height * 100}%` }} onPointerDown={(event) => { event.stopPropagation(); onOriginalSelect(line); }} />)}
-    {originalEdit && <textarea autoFocus className="originalTextEditor" aria-label="Edit original PDF text" value={originalEdit.draft} style={{ left: `${originalEdit.line.x * 100}%`, top: `${originalEdit.line.y * 100}%`, width: `${Math.max(originalEdit.line.width, 0.12) * 100}%`, minHeight: `${Math.max(originalEdit.line.height, 0.035) * 100}%`, fontSize: originalEdit.line.size * zoom, color: originalEdit.line.color, fontFamily: fontStack(originalEdit.line.fontName, originalEdit.line.fontFamily), fontWeight: originalEdit.line.bold ? 700 : 400, fontStyle: originalEdit.line.italic ? "italic" : "normal" }} onPointerDown={(event) => event.stopPropagation()} onChange={(event) => onOriginalChange(event.target.value)} />}
+    {originalEdit && editorBox && <textarea autoFocus className="originalTextEditor" aria-label="Edit original PDF text" value={originalEdit.draft} style={{ left: `${originalEdit.line.x * 100}%`, top: `${originalEdit.line.y * 100}%`, width: `${editorBox.width * 100}%`, height: `${editorBox.height * 100}%`, fontSize: originalEdit.line.size * zoom, color: originalEdit.line.color, fontFamily: fontStack(originalEdit.line.fontName, originalEdit.line.fontFamily), fontWeight: originalEdit.line.bold ? 700 : 400, fontStyle: originalEdit.line.italic ? "italic" : "normal" }} onPointerDown={(event) => event.stopPropagation()} onChange={(event) => onOriginalChange(event.target.value)} />}
     {tool === "select" && shown.map((overlay) => { const bounds = boundsOf(overlay); const selected = selectedId === overlay.id; return <div key={`hit-${overlay.id}`} className={`objectBox ${selected ? "selected" : ""}`} style={{ left: `${bounds.x * 100}%`, top: `${bounds.y * 100}%`, width: `${bounds.width * 100}%`, height: `${bounds.height * 100}%` }} onPointerDown={(event) => objectDown(event, overlay, "move")}>{selected && <button className="resizeHandle" aria-label="Resize selected object" onPointerDown={(event) => objectDown(event, overlay, "resize")} />}</div>; })}
   </div></div>;
 }
