@@ -36,6 +36,17 @@ describe("commands", () => {
     expect(applyCommand(applyCommand(seeded, command), inverseCommand(command)).overlays[0]).toMatchObject({ kind: "shape", x: 0.1 });
   });
 
+  it("adds and removes a replacement edit as one undoable command", () => {
+    const overlays = [
+      { id: "erase", page: 0, kind: "redact", x: 0.1, y: 0.1, width: 0.4, height: 0.04, color: "#ffffff" },
+      { id: "replacement", page: 0, kind: "text", x: 0.1, y: 0.1, width: 0.4, height: 0.04, text: "Replacement", size: 12, color: "#111111", fontFamily: "Helvetica", bold: false, italic: false, underline: false },
+    ] as const;
+    const command: Command = { type: "addMany", overlays: [...overlays] };
+    const edited = applyCommand(emptyDocument(1), command);
+    expect(edited.overlays).toHaveLength(2);
+    expect(applyCommand(edited, inverseCommand(command)).overlays).toHaveLength(0);
+  });
+
   it("rejects corrupt persisted snapshots", () => {
     expect(() => EditorDocumentSchema.parse({ schemaVersion: 1, overlays: [], rotations: {}, pageOrder: [0, -1] })).toThrow();
   });

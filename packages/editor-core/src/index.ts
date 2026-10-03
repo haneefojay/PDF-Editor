@@ -44,7 +44,9 @@ export type EditorDocument = z.infer<typeof EditorDocumentSchema>;
 
 export type Command =
   | { type: "add"; overlay: Overlay }
+  | { type: "addMany"; overlays: Overlay[] }
   | { type: "remove"; overlay: Overlay }
+  | { type: "removeMany"; overlays: Overlay[] }
   | { type: "updateOverlay"; before: Overlay; after: Overlay }
   | { type: "rotate"; page: number; before: number; after: number }
   | { type: "setPageOrder"; before: number[]; after: number[] }
@@ -65,7 +67,12 @@ export const emptyDocument = (pageCount = 0): EditorDocument => ({
 export function applyCommand(state: EditorDocument, command: Command): EditorDocument {
   return produce(state, (draft) => {
     if (command.type === "add") draft.overlays.push(command.overlay);
+    if (command.type === "addMany") draft.overlays.push(...command.overlays);
     if (command.type === "remove") draft.overlays = draft.overlays.filter((item) => item.id !== command.overlay.id);
+    if (command.type === "removeMany") {
+      const ids = new Set(command.overlays.map((item) => item.id));
+      draft.overlays = draft.overlays.filter((item) => !ids.has(item.id));
+    }
     if (command.type === "updateOverlay") {
       const index = draft.overlays.findIndex((item) => item.id === command.before.id);
       if (index >= 0) draft.overlays[index] = command.after;
@@ -80,7 +87,9 @@ export function applyCommand(state: EditorDocument, command: Command): EditorDoc
 
 export function inverseCommand(command: Command): Command {
   if (command.type === "add") return { type: "remove", overlay: command.overlay };
+  if (command.type === "addMany") return { type: "removeMany", overlays: command.overlays };
   if (command.type === "remove") return { type: "add", overlay: command.overlay };
+  if (command.type === "removeMany") return { type: "addMany", overlays: command.overlays };
   if (command.type === "updateOverlay") return { ...command, before: command.after, after: command.before };
   if (command.type === "rotate") return { ...command, before: command.after, after: command.before };
   if (command.type === "setPageOrder") return { ...command, before: command.after, after: command.before };

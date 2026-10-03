@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type DragEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { ArrowDown, ArrowUp, Bold, ChevronLeft, ChevronRight, Crop, Download, FileImage, FilePlus2, Highlighter, Info, Italic, ListChecks, Merge, MousePointer2, PenLine, Redo2, RotateCw, Scissors, Shapes, Signature, Trash2, Type, Underline, Undo2, X, ZoomIn, ZoomOut } from "lucide-react";
-import { createPdfEngine, type FormField, type PageInfo, type PdfMetadata } from "@paperless/pdf-engine";
+import { createPdfEngine, type FormField, type PageInfo, type PdfMetadata, type PositionedTextLine } from "@paperless/pdf-engine";
 import { EditorDocumentSchema, normalizeRect, type EditorDocument, type Overlay, type Tool } from "@paperless/editor-core";
 import { deleteProject, listProjects, loadProject, saveProject, type ProjectSummary } from "./persistence";
 import { useEditor } from "./store";
@@ -42,6 +42,8 @@ export function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [shapeKind, setShapeKind] = useState<ShapeKind>("rectangle");
   const [drawColor, setDrawColor] = useState("#d64b35");
+  const [textLines, setTextLines] = useState<PositionedTextLine[]>([]);
+  const [originalEdit, setOriginalEdit] = useState<{ line: PositionedTextLine; draft: string } | null>(null);
   const { tool, zoom, page, doc, undo, redo, setTool, setZoom, setPage, execute, undoOnce, redoOnce, reset, hydrate } = useEditor();
 
   const refreshRecent = useCallback(() => listProjects().then(setRecent).catch(() => setRecent([])), []);
@@ -86,7 +88,9 @@ export function App() {
       setMetadataDraft(input.snapshot?.metadata ?? meta.metadata);
       setOpen({ id: input.id, name: input.name, bytes: input.bytes, pages: meta.pages, urls: new Map(), formFields: meta.formFields, initialMetadata: meta.metadata, initialFormValues });
       setImage(null);
+      setTextLines([]);
       setSelectedId(null);
+      setOriginalEdit(null);
     } catch (cause) {
       if (sequence === loadSequence.current) setError(cause instanceof Error ? cause.message : "This PDF could not be opened.");
     } finally {
@@ -122,6 +126,8 @@ export function App() {
     if (!openBytesRef || doc.pageOrder.length === 0) return;
     let active = true;
     setBusy(true);
+    setTextLines([]);
+    setOriginalEdit(null);
     const render = async () => {
       try {
         await withTimeout(engine.current!.ready, 20_000, "The PDF renderer did not start.");
@@ -147,6 +153,9 @@ export function App() {
         return { ...current, urls: new Map(current.urls).set(key, url) };
       });
       setImage(url);
+      return withTimeout(engine.current!.api.extractTextLines(sourcePage), 20_000, "Text selection took too long.").then((lines) => {
+        if (active) setTextLines(lines);
+      });
     }).catch((cause) => setError(cause instanceof Error ? cause.message : "Page render failed")).finally(() => {
       if (active) setBusy(false);
     });
@@ -203,6 +212,8 @@ export function App() {
     open?.urls.forEach((url) => URL.revokeObjectURL(url));
     setOpen(null);
     setImage(null);
+    setTextLines([]);
+    setOriginalEdit(null);
     setNotice("");
     setError("");
     void refreshRecent();
@@ -261,6 +272,28 @@ export function App() {
     setTool("select");
   };
 
+  const applyOriginalTextEdit = () => {
+    if (!originalEdit) return;
+    const { line, draft } = originalEdit;
+    const padding = 0.002;
+    const erase: Overlay = {
+      id: crypto.randomUUID(), page: sourcePage, kind: "redact",
+      x: Math.max(0, line.x - padding), y: Math.max(0, line.y - padding),
+      width: Math.min(1 - Math.max(0, line.x - padding), line.width + padding * 2),
+      height: Math.min(1 - Math.max(0, line.y - padding), line.height + padding * 2),
+      color: "#ffffff",
+    };
+    const replacements: Overlay[] = [erase];
+    if (draft.length > 0) replacements.push({
+      id: crypto.randomUUID(), page: sourcePage, kind: "text", x: line.x, y: line.y,
+      width: Math.max(line.width, 0.05), height: Math.max(line.height, 0.02), text: draft,
+      size: line.size, color: line.color, fontFamily: line.fontFamily, bold: line.bold, italic: line.italic, underline: false,
+    });
+    execute({ type: "addMany", overlays: replacements });
+    setOriginalEdit(null);
+    setSelectedId(replacements.at(-1)?.kind === "text" ? replacements.at(-1)!.id : null);
+  };
+
   const mergePdf = async (file: File) => {
     if (!open) return;
     setBusy(true); setError("");
@@ -313,16 +346,17 @@ export function App() {
       <aside className="rail"><div className="railTitle"><b>Pages</b><span>{doc.pageOrder.length}</span></div>{doc.pageOrder.map((source, index) => <div key={source} role="button" tabIndex={0} className={index === page ? "thumb active" : "thumb"} onClick={() => setPage(index)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") setPage(index); }}><span>{index + 1}</span><div className="thumbPreview">Page {source + 1}</div><span className="pageActions"><button aria-label={`Move page ${index + 1} up`} disabled={index === 0} onClick={(event) => { event.stopPropagation(); movePage(index, -1); }}><ArrowUp /></button><button aria-label={`Move page ${index + 1} down`} disabled={index === doc.pageOrder.length - 1} onClick={(event) => { event.stopPropagation(); movePage(index, 1); }}><ArrowDown /></button><button aria-label={`Delete page ${index + 1}`} onClick={(event) => { event.stopPropagation(); removePage(index); }}><Trash2 /></button></span></div>)}</aside>
       <main className="canvasArea">
         <div className="toolRegion">
-          <nav className="tools" aria-label="Editing tools">{tools.map(({ id, label, Icon }) => <button key={id} className={tool === id ? "chosen" : ""} aria-pressed={tool === id} onClick={() => { setTool(id); if (id !== "select") setSelectedId(null); }}><Icon /><span>{label}</span></button>)}<span className="divide" /><button onClick={() => imageInput.current?.click()}><FileImage /><span>Image</span></button><input ref={imageInput} hidden type="file" accept="image/png,image/jpeg" onChange={(event) => { const file = event.target.files?.[0]; if (file) void addImage(file); event.target.value = ""; }} /><button onClick={() => execute({ type: "rotate", page: sourcePage, before: doc.rotations[sourcePage] ?? 0, after: (doc.rotations[sourcePage] ?? 0) + 90 })}><RotateCw /><span>Rotate</span></button><button onClick={() => mergeInput.current?.click()}><Merge /><span>Merge</span></button><input ref={mergeInput} hidden type="file" accept="application/pdf,.pdf" onChange={(event) => { const file = event.target.files?.[0]; if (file) void mergePdf(file); event.target.value = ""; }} /><button onClick={() => void splitCurrentPage()}><Scissors /><span>Split</span></button><button onClick={() => { setMetadataDraft(doc.metadata); setShowProperties(true); }}><Info /><span>Properties</span></button><button title={open.formFields.length ? "Edit interactive PDF fields" : "No interactive form fields detected"} onClick={() => open.formFields.length ? setShowForms(true) : setNotice("This PDF has no interactive form fields.")}><ListChecks /><span>Forms</span></button></nav>
-          {(tool === "shape" || tool === "ink" || tool === "signature" || selected) && <div className="contextBar">
+          <nav className="tools" aria-label="Editing tools">{tools.map(({ id, label, Icon }) => <button key={id} className={tool === id ? "chosen" : ""} aria-pressed={tool === id} onClick={() => { setTool(id); if (id !== "select") { setSelectedId(null); setOriginalEdit(null); } else setNotice("Tap existing PDF text to edit it, or tap an added object to move or resize it."); }}><Icon /><span>{label}</span></button>)}<span className="divide" /><button onClick={() => imageInput.current?.click()}><FileImage /><span>Image</span></button><input ref={imageInput} hidden type="file" accept="image/png,image/jpeg" onChange={(event) => { const file = event.target.files?.[0]; if (file) void addImage(file); event.target.value = ""; }} /><button onClick={() => execute({ type: "rotate", page: sourcePage, before: doc.rotations[sourcePage] ?? 0, after: (doc.rotations[sourcePage] ?? 0) + 90 })}><RotateCw /><span>Rotate</span></button><button onClick={() => mergeInput.current?.click()}><Merge /><span>Merge</span></button><input ref={mergeInput} hidden type="file" accept="application/pdf,.pdf" onChange={(event) => { const file = event.target.files?.[0]; if (file) void mergePdf(file); event.target.value = ""; }} /><button onClick={() => void splitCurrentPage()}><Scissors /><span>Split</span></button><button onClick={() => { setMetadataDraft(doc.metadata); setShowProperties(true); }}><Info /><span>Properties</span></button><button title={open.formFields.length ? "Edit interactive PDF fields" : "No interactive form fields detected"} onClick={() => open.formFields.length ? setShowForms(true) : setNotice("This PDF has no interactive form fields.")}><ListChecks /><span>Forms</span></button></nav>
+          {(tool === "shape" || tool === "ink" || tool === "signature" || selected || originalEdit) && <div className="contextBar">
             {tool === "shape" && <label>Shape<select value={shapeKind} onChange={(event) => setShapeKind(event.target.value as ShapeKind)}><option value="rectangle">Rectangle</option><option value="square">Square</option><option value="circle">Circle</option><option value="triangle">Triangle</option></select></label>}
             {(tool === "shape" || tool === "ink" || tool === "signature") && <label>Colour<input aria-label="Drawing colour" type="color" value={drawColor} onChange={(event) => setDrawColor(event.target.value)} /></label>}
+            {originalEdit && <><span className="editingLabel">Editing original PDF text</span><button className="primaryAction" onClick={applyOriginalTextEdit}>Apply</button><button onClick={() => setOriginalEdit({ ...originalEdit, draft: "" })}>Delete text</button><button onClick={() => setOriginalEdit(null)}>Cancel</button></>}
             {selected?.kind === "text" && <><label>Text<input className="textInput" value={selected.text} onChange={(event) => execute({ type: "updateOverlay", before: selected, after: { ...selected, text: event.target.value } })} /></label><label>Font<select value={selected.fontFamily} onChange={(event) => execute({ type: "updateOverlay", before: selected, after: { ...selected, fontFamily: event.target.value as "Helvetica" | "Times" | "Courier" } })}><option>Helvetica</option><option>Times</option><option>Courier</option></select></label><label>Size<input className="numberInput" type="number" min="6" max="144" value={selected.size} onChange={(event) => execute({ type: "updateOverlay", before: selected, after: { ...selected, size: Math.max(6, Number(event.target.value)) } })} /></label><button aria-label="Bold" className={selected.bold ? "active" : ""} onClick={() => execute({ type: "updateOverlay", before: selected, after: { ...selected, bold: !selected.bold } })}><Bold /></button><button aria-label="Italic" className={selected.italic ? "active" : ""} onClick={() => execute({ type: "updateOverlay", before: selected, after: { ...selected, italic: !selected.italic } })}><Italic /></button><button aria-label="Underline" className={selected.underline ? "active" : ""} onClick={() => execute({ type: "updateOverlay", before: selected, after: { ...selected, underline: !selected.underline } })}><Underline /></button><label>Colour<input type="color" value={selected.color} onChange={(event) => execute({ type: "updateOverlay", before: selected, after: { ...selected, color: event.target.value } })} /></label></>}
             {selected && selected.kind !== "text" && "color" in selected && <label>Colour<input type="color" value={selected.color} onChange={(event) => execute({ type: "updateOverlay", before: selected, after: { ...selected, color: event.target.value } as Overlay })} /></label>}
             {selected && <button className="danger" onClick={() => { execute({ type: "remove", overlay: selected }); setSelectedId(null); }}><Trash2 /> Delete</button>}
           </div>}
         </div>
-        <div className="stage">{busy && <div className="loading">Rendering page…</div>}<div className="pageViewport"><PageCanvas image={image} info={pageInfo} zoom={zoom} rotation={doc.rotations[sourcePage] ?? 0} overlays={current} crop={doc.crops[sourcePage]} tool={tool} shapeKind={shapeKind} drawColor={drawColor} selectedId={selectedId} onSelect={setSelectedId} onAdd={(overlay) => { execute({ type: "add", overlay }); setSelectedId(overlay.id); if (overlay.kind === "text") setTool("select"); }} onUpdate={(before, after) => execute({ type: "updateOverlay", before, after })} onCrop={(crop) => execute({ type: "setCrop", page: sourcePage, before: doc.crops[sourcePage] ?? null, after: crop })} page={sourcePage} /></div></div>
+        <div className="stage">{busy && <div className="loading">Rendering page…</div>}<div className="pageViewport"><PageCanvas image={image} info={pageInfo} zoom={zoom} rotation={doc.rotations[sourcePage] ?? 0} overlays={current} textLines={textLines} originalEdit={originalEdit} crop={doc.crops[sourcePage]} tool={tool} shapeKind={shapeKind} drawColor={drawColor} selectedId={selectedId} onSelect={(id) => { setSelectedId(id); if (id) setOriginalEdit(null); }} onOriginalSelect={(line) => { setSelectedId(null); setOriginalEdit({ line, draft: line.text }); }} onOriginalChange={(draft) => setOriginalEdit((currentEdit) => currentEdit ? { ...currentEdit, draft } : null)} onAdd={(overlay) => { execute({ type: "add", overlay }); setSelectedId(overlay.id); if (overlay.kind === "text") setTool("select"); }} onUpdate={(before, after) => execute({ type: "updateOverlay", before, after })} onCrop={(crop) => execute({ type: "setCrop", page: sourcePage, before: doc.crops[sourcePage] ?? null, after: crop })} page={sourcePage} /></div></div>
         <div className="status"><div><button onClick={() => setPage(Math.max(0, page - 1))} disabled={page === 0}><ChevronLeft /></button><span>{page + 1} / {doc.pageOrder.length}</span><button onClick={() => setPage(Math.min(doc.pageOrder.length - 1, page + 1))} disabled={page === doc.pageOrder.length - 1}><ChevronRight /></button></div><div><button aria-label="Zoom out" onClick={() => setZoom(zoom - 0.15)}><ZoomOut /></button><span>{Math.round(zoom * 100)}%</span><button aria-label="Zoom in" onClick={() => setZoom(zoom + 0.15)}><ZoomIn /></button></div></div>
       </main>
     </div>
@@ -332,7 +366,7 @@ export function App() {
   </div>;
 }
 
-function PageCanvas({ image, info, zoom, rotation, overlays, crop, tool, shapeKind, drawColor, selectedId, onSelect, onAdd, onUpdate, onCrop, page }: { image: string | null; info: PageInfo; zoom: number; rotation: number; overlays: Overlay[]; crop?: { x: number; y: number; width: number; height: number }; tool: Tool; shapeKind: ShapeKind; drawColor: string; selectedId: string | null; onSelect: (id: string | null) => void; onAdd: (overlay: Overlay) => void; onUpdate: (before: Overlay, after: Overlay) => void; onCrop: (crop: { x: number; y: number; width: number; height: number }) => void; page: number }) {
+function PageCanvas({ image, info, zoom, rotation, overlays, textLines, originalEdit, crop, tool, shapeKind, drawColor, selectedId, onSelect, onOriginalSelect, onOriginalChange, onAdd, onUpdate, onCrop, page }: { image: string | null; info: PageInfo; zoom: number; rotation: number; overlays: Overlay[]; textLines: PositionedTextLine[]; originalEdit: { line: PositionedTextLine; draft: string } | null; crop?: { x: number; y: number; width: number; height: number }; tool: Tool; shapeKind: ShapeKind; drawColor: string; selectedId: string | null; onSelect: (id: string | null) => void; onOriginalSelect: (line: PositionedTextLine) => void; onOriginalChange: (draft: string) => void; onAdd: (overlay: Overlay) => void; onUpdate: (before: Overlay, after: Overlay) => void; onCrop: (crop: { x: number; y: number; width: number; height: number }) => void; page: number }) {
   const ref = useRef<HTMLDivElement>(null);
   const start = useRef<{ x: number; y: number } | null>(null);
   const points = useRef<{ x: number; y: number }[]>([]);
@@ -418,6 +452,7 @@ function PageCanvas({ image, info, zoom, rotation, overlays, crop, tool, shapeKi
     drag.current = { before: overlay, start: position(event), bounds: boundsOf(overlay), mode };
     setPreview(overlay);
   };
+  const lineWasReplaced = (line: PositionedTextLine) => shown.some((overlay) => overlay.kind === "redact" && overlay.color.toLowerCase() === "#ffffff" && line.x + line.width / 2 >= overlay.x && line.x + line.width / 2 <= overlay.x + overlay.width && line.y + line.height / 2 >= overlay.y && line.y + line.height / 2 <= overlay.y + overlay.height);
   return <div className="pageWrap" style={{ width: info.width * zoom, height: info.height * zoom, transform: `rotate(${rotation}deg)` }}><div ref={ref} className={`page tool-${tool}`} onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up}>
     {image && <img src={image} alt={`Rendered PDF page ${page + 1}`} draggable={false} />}
     {shown.filter((overlay): overlay is Extract<Overlay, { kind: "image" }> => overlay.kind === "image").map((overlay) => <img key={overlay.id} className="imageOverlay" src={overlay.dataUrl} alt="Placed PDF content" style={{ left: `${overlay.x * 100}%`, top: `${overlay.y * 100}%`, width: `${overlay.width * 100}%`, height: `${overlay.height * 100}%` }} />)}
@@ -430,6 +465,8 @@ function PageCanvas({ image, info, zoom, rotation, overlays, crop, tool, shapeKi
       {crop && <rect className="cropRect" x={crop.x} y={crop.y} width={crop.width} height={crop.height} />}
     </svg>
     {shown.filter((overlay): overlay is Extract<Overlay, { kind: "text" }> => overlay.kind === "text").map((overlay) => <span key={overlay.id} className="textOverlay" style={{ left: `${overlay.x * 100}%`, top: `${overlay.y * 100}%`, width: `${overlay.width * 100}%`, height: `${overlay.height * 100}%`, fontSize: overlay.size * zoom, color: overlay.color, fontFamily: overlay.fontFamily === "Times" ? "Times New Roman, serif" : overlay.fontFamily === "Courier" ? "Courier New, monospace" : "Arial, sans-serif", fontWeight: overlay.bold ? 700 : 400, fontStyle: overlay.italic ? "italic" : "normal", textDecoration: overlay.underline ? "underline" : "none" }}>{overlay.text}</span>)}
+    {tool === "select" && textLines.filter((line) => !lineWasReplaced(line)).map((line) => <button key={line.id} className={`originalTextHit ${originalEdit?.line.id === line.id ? "selected" : ""}`} aria-label={`Edit PDF text: ${line.text.trim().slice(0, 80)}`} style={{ left: `${line.x * 100}%`, top: `${line.y * 100}%`, width: `${line.width * 100}%`, height: `${line.height * 100}%` }} onPointerDown={(event) => { event.stopPropagation(); onOriginalSelect(line); }} />)}
+    {originalEdit && <textarea autoFocus className="originalTextEditor" aria-label="Edit original PDF text" value={originalEdit.draft} style={{ left: `${originalEdit.line.x * 100}%`, top: `${originalEdit.line.y * 100}%`, width: `${Math.max(originalEdit.line.width, 0.12) * 100}%`, minHeight: `${Math.max(originalEdit.line.height, 0.035) * 100}%`, fontSize: originalEdit.line.size * zoom, color: originalEdit.line.color, fontFamily: originalEdit.line.fontFamily === "Times" ? "Times New Roman, serif" : originalEdit.line.fontFamily === "Courier" ? "Courier New, monospace" : "Arial, sans-serif", fontWeight: originalEdit.line.bold ? 700 : 400, fontStyle: originalEdit.line.italic ? "italic" : "normal" }} onPointerDown={(event) => event.stopPropagation()} onChange={(event) => onOriginalChange(event.target.value)} />}
     {tool === "select" && shown.map((overlay) => { const bounds = boundsOf(overlay); const selected = selectedId === overlay.id; return <div key={`hit-${overlay.id}`} className={`objectBox ${selected ? "selected" : ""}`} style={{ left: `${bounds.x * 100}%`, top: `${bounds.y * 100}%`, width: `${bounds.width * 100}%`, height: `${bounds.height * 100}%` }} onPointerDown={(event) => objectDown(event, overlay, "move")}>{selected && <button className="resizeHandle" aria-label="Resize selected object" onPointerDown={(event) => objectDown(event, overlay, "resize")} />}</div>; })}
   </div></div>;
 }

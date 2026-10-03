@@ -1,6 +1,6 @@
 /// <reference lib="webworker" />
 import * as Comlink from "comlink";
-import type { ExportOverlay, ExportRequest, FormField, PdfMetadata, PdfWorkerApi } from "./protocol";
+import type { ExportOverlay, ExportRequest, FormField, PdfMetadata, PdfWorkerApi, PositionedTextLine } from "./protocol";
 import type * as Mupdf from "mupdf";
 import wasmUrl from "../node_modules/mupdf/dist/mupdf-wasm.wasm?url";
 
@@ -25,16 +25,55 @@ const dataUrlBytes = (dataUrl: string) => {
   const raw = atob(encoded);
   return Uint8Array.from(raw, (char) => char.charCodeAt(0));
 };
+const extractedColor = (color: Mupdf.Color) => {
+  const rgb = color.length === 1 ? [color[0]!, color[0]!, color[0]!] : color.length === 3 ? color : [0, 0, 0];
+  return `#${rgb.slice(0, 3).map((value) => Math.round(Math.min(1, Math.max(0, value)) * 255).toString(16).padStart(2, "0")).join("")}`;
+};
+const extractedFont = (name: string) => {
+  const lower = name.toLowerCase();
+  return {
+    fontFamily: (lower.includes("courier") || lower.includes("mono") ? "Courier" : lower.includes("times") || lower.includes("serif") ? "Times" : "Helvetica") as PositionedTextLine["fontFamily"],
+    bold: lower.includes("bold") || lower.includes("black") || lower.includes("semibold"),
+    italic: lower.includes("italic") || lower.includes("oblique"),
+  };
+};
 const metadataOf = (doc: Mupdf.Document): PdfMetadata => ({
   title: doc.getMetaData(mupdf.Document.META_INFO_TITLE) ?? "",
   author: doc.getMetaData(mupdf.Document.META_INFO_AUTHOR) ?? "",
   subject: doc.getMetaData(mupdf.Document.META_INFO_SUBJECT) ?? "",
   keywords: doc.getMetaData(mupdf.Document.META_INFO_KEYWORDS) ?? "",
 });
-const annotationFont = (overlay: Extract<ExportOverlay, { kind: "text" }>) => {
-  if (overlay.fontFamily === "Times") return overlay.bold && overlay.italic ? "Times-BoldItalic" : overlay.bold ? "Times-Bold" : overlay.italic ? "Times-Italic" : "Times-Roman";
-  if (overlay.fontFamily === "Courier") return overlay.bold && overlay.italic ? "Courier-BoldOblique" : overlay.bold ? "Courier-Bold" : overlay.italic ? "Courier-Oblique" : "Courier";
-  return overlay.bold && overlay.italic ? "Helvetica-BoldOblique" : overlay.bold ? "Helvetica-Bold" : overlay.italic ? "Helvetica-Oblique" : "Helvetica";
+const appendTextContent = (doc: Mupdf.PDFDocument, page: Mupdf.PDFPage, overlay: Extract<ExportOverlay, { kind: "text" }>, resourceName: string) => {
+  const pageObject = page.getObject(); const bounds = page.getBounds(); const width = bounds[2] - bounds[0]; const height = bounds[3] - bounds[1];
+  const fontName = overlay.fontFamily === "Courier" ? overlay.bold ? "Courier-Bold" : overlay.italic ? "Courier-Oblique" : "Courier" : overlay.fontFamily === "Times" ? overlay.bold ? "Times-Bold" : overlay.italic ? "Times-Italic" : "Times-Roman" : overlay.bold ? "Helvetica-Bold" : overlay.italic ? "Helvetica-Oblique" : "Helvetica";
+  const font = new mupdf.Font(fontName); const fontReference = doc.addSimpleFont(font, mupdf.Font.SIMPLE_ENCODING_LATIN);
+  let resources = pageObject.get("Resources");
+  if (resources.isNull()) resources = pageObject.getInheritable("Resources");
+  if (resources.isNull()) { resources = doc.newDictionary(); pageObject.put("Resources", resources); }
+  resources = resources.resolve();
+  let fonts = resources.get("Font");
+  if (fonts.isNull()) { fonts = doc.newDictionary(); resources.put("Font", fonts); }
+  fonts.resolve().put(resourceName, fontReference);
+  const [red, green, blue] = toColor(overlay.color) as [number, number, number];
+  const x = bounds[0] + overlay.x * width; const top = bounds[1] + overlay.y * height;
+  const lines = overlay.text.split(/\r?\n/); const commands = ["q", "BT", `/${resourceName} ${overlay.size} Tf`, `${red} ${green} ${blue} rg`];
+  lines.forEach((line, index) => {
+    const encoded = Array.from(line, (character) => {
+      const code = character.codePointAt(0) ?? 63;
+      return code > 0 && code <= 255 ? code : 63;
+    });
+    const hex = encoded.map((code) => code.toString(16).padStart(2, "0")).join("");
+    const y = bounds[3] - top - overlay.size - index * overlay.size * 1.2;
+    commands.push(`1 0 0 1 ${x} ${y} Tm`, `<${hex}> Tj`);
+    if (overlay.underline) commands.push("ET", `${Math.max(0.7, overlay.size / 14)} w`, `${x} ${y - 2} m ${x + overlay.width * width} ${y - 2} l S`, "BT", `/${resourceName} ${overlay.size} Tf`, `${red} ${green} ${blue} rg`);
+  });
+  commands.push("ET", "Q");
+  const stream = doc.addStream(new TextEncoder().encode(commands.join("\n")), doc.newDictionary());
+  const contents = pageObject.get("Contents");
+  if (contents.isNull()) pageObject.put("Contents", stream);
+  else if (contents.resolve().isArray()) contents.resolve().push(stream);
+  else { const array = doc.newArray(); array.push(contents); array.push(stream); pageObject.put("Contents", array); }
+  font.destroy();
 };
 
 class Engine implements PdfWorkerApi {
@@ -76,6 +115,29 @@ class Engine implements PdfWorkerApi {
     const page = this.doc.loadPage(index); const text = page.toStructuredText("").asText(); page.destroy(); return text;
   }
 
+  async extractTextLines(index: number) {
+    if (!this.doc) throw new Error("No PDF is open");
+    const page = this.doc.loadPage(index); const bounds = page.getBounds(); const pageWidth = bounds[2] - bounds[0]; const pageHeight = bounds[3] - bounds[1];
+    const structured = page.toStructuredText("preserve-whitespace");
+    const lines: PositionedTextLine[] = [];
+    let current: { bbox: Mupdf.Rect; text: string; size: number; color: string; fontName: string } | null = null;
+    structured.walk({
+      beginLine: (bbox) => { current = { bbox, text: "", size: 12, color: "#171714", fontName: "Helvetica" }; },
+      onChar: (char, _origin, font, size, _quad, color) => {
+        if (!current) return;
+        current.text += char;
+        if (!current.fontName || current.text.length === 1) { current.fontName = font.getName(); current.size = size; current.color = extractedColor(color); }
+      },
+      endLine: () => {
+        if (!current || !current.text.trim()) { current = null; return; }
+        const font = extractedFont(current.fontName); const [x0, y0, x1, y1] = current.bbox;
+        lines.push({ id: `${index}-${lines.length}`, text: current.text, x: (x0 - bounds[0]) / pageWidth, y: (y0 - bounds[1]) / pageHeight, width: Math.max(0.005, (x1 - x0) / pageWidth), height: Math.max(0.005, (y1 - y0) / pageHeight), size: current.size, color: current.color, ...font });
+        current = null;
+      },
+    });
+    structured.destroy(); page.destroy(); return lines;
+  }
+
   async exportDocument(request: ExportRequest) {
     if (!this.doc || !this.sourceBytes) throw new Error("No PDF is open");
     const opened = mupdf.Document.openDocument(this.sourceBytes, "application/pdf");
@@ -84,6 +146,8 @@ class Engine implements PdfWorkerApi {
     let annotationCount = 0;
     let redactionCount = 0;
     const pagesWithRedactions = new Set<number>();
+    const redactionFills: Extract<ExportOverlay, { kind: "redact" }>[] = [];
+    const textOverlays: Extract<ExportOverlay, { kind: "text" }>[] = [];
 
     doc.setMetaData(mupdf.Document.META_INFO_TITLE, request.metadata.title);
     doc.setMetaData(mupdf.Document.META_INFO_AUTHOR, request.metadata.author);
@@ -119,13 +183,7 @@ class Engine implements PdfWorkerApi {
       if (overlay.page < 0 || overlay.page >= doc.countPages()) continue;
       const page = doc.loadPage(overlay.page); const bounds = page.getBounds();
       if (overlay.kind === "text") {
-        const annotation = page.createAnnotation("FreeText");
-        annotation.setRect(normalizedRect(overlay, bounds)); annotation.setContents(overlay.text); annotation.setDefaultAppearance(annotationFont(overlay), overlay.size, toColor(overlay.color)); annotation.setColor(toColor(overlay.color)); annotation.setBorderWidth(0); annotation.setFlags(mupdf.PDFAnnotation.IS_PRINT); annotation.update(); annotation.destroy(); annotationCount += 1;
-        if (overlay.underline) {
-          const box = normalizedRect(overlay, bounds); const underline = page.createAnnotation("Line");
-          underline.setLine([box[0], Math.min(box[3], box[1] + overlay.size * 1.25)], [box[2], Math.min(box[3], box[1] + overlay.size * 1.25)]);
-          underline.setColor(toColor(overlay.color)); underline.setBorderWidth(Math.max(1, overlay.size / 14)); underline.setFlags(mupdf.PDFAnnotation.IS_PRINT); underline.update(); underline.destroy(); annotationCount += 1;
-        }
+        textOverlays.push(overlay);
       } else if (overlay.kind === "ink" || overlay.kind === "signature") {
         const annotation = page.createAnnotation("Ink"); annotation.setInkList([overlay.points.map((point) => pagePoint(point, bounds))]); annotation.setColor(toColor(overlay.color)); annotation.setBorderWidth(overlay.width); annotation.setFlags(mupdf.PDFAnnotation.IS_PRINT); annotation.update(); annotation.destroy(); annotationCount += 1;
       } else if (overlay.kind === "rect") {
@@ -139,13 +197,19 @@ class Engine implements PdfWorkerApi {
       } else if (overlay.kind === "image") {
         const image = new mupdf.Image(dataUrlBytes(overlay.dataUrl)); const annotation = page.createAnnotation("Stamp"); annotation.setRect(normalizedRect(overlay, bounds)); annotation.setStampImage(image); annotation.setFlags(mupdf.PDFAnnotation.IS_PRINT); annotation.update(); annotation.destroy(); image.destroy(); annotationCount += 1;
       } else if (overlay.kind === "redact") {
-        const annotation = page.createAnnotation("Redact"); annotation.setRect(normalizedRect(overlay, bounds)); annotation.setColor([0, 0, 0]); annotation.setFlags(mupdf.PDFAnnotation.IS_PRINT); annotation.update(); annotation.destroy(); pagesWithRedactions.add(overlay.page); redactionCount += 1;
+        const annotation = page.createAnnotation("Redact"); annotation.setRect(normalizedRect(overlay, bounds)); annotation.setFlags(mupdf.PDFAnnotation.IS_PRINT); annotation.update(); annotation.destroy(); pagesWithRedactions.add(overlay.page); redactionFills.push(overlay); redactionCount += 1;
       }
       page.update(); page.destroy();
     }
 
-    for (const pageIndex of pagesWithRedactions) { const page = doc.loadPage(pageIndex); page.applyRedactions(true, mupdf.PDFPage.REDACT_IMAGE_PIXELS, mupdf.PDFPage.REDACT_LINE_ART_REMOVE_IF_TOUCHED, mupdf.PDFPage.REDACT_TEXT_REMOVE); page.update(); page.destroy(); }
-    doc.bake(true, true);
+    for (const pageIndex of pagesWithRedactions) { const page = doc.loadPage(pageIndex); page.applyRedactions(false, mupdf.PDFPage.REDACT_IMAGE_PIXELS, mupdf.PDFPage.REDACT_LINE_ART_REMOVE_IF_TOUCHED, mupdf.PDFPage.REDACT_TEXT_REMOVE); page.update(); page.destroy(); }
+    for (const fill of redactionFills) {
+      if (fill.color.toLowerCase() === "#ffffff") continue;
+      const page = doc.loadPage(fill.page); const annotation = page.createAnnotation("Square"); annotation.setRect(normalizedRect(fill, page.getBounds())); annotation.setColor(toColor(fill.color)); annotation.setInteriorColor(toColor(fill.color)); annotation.setBorderWidth(0); annotation.setFlags(mupdf.PDFAnnotation.IS_PRINT); annotation.update(); annotation.destroy(); page.update(); page.destroy();
+    }
+    for (const overlay of textOverlays) {
+      const page = doc.loadPage(overlay.page); appendTextContent(doc, page, overlay, `PEF${annotationCount + 1}`); page.update(); page.destroy(); annotationCount += 1;
+    }
     const uniquePages = new Set(request.pageOrder);
     if (request.pageOrder.length === 0 || uniquePages.size !== request.pageOrder.length || request.pageOrder.some((page) => page < 0 || page >= doc.countPages())) { doc.destroy(); throw new Error("Export validation failed: page order is invalid."); }
     doc.rearrangePages(request.pageOrder);
