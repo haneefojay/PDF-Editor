@@ -6,14 +6,15 @@ A local-first, privacy-first PDF editor for the web, licensed under AGPL-3.0. PD
 
 - Opens local PDFs by picker or drag-and-drop
 - Parses and renders pages in a dedicated MuPDF.js Web Worker
-- Page rail, keyboard navigation, zoom, fit, and rotation preview
+- Page rail, keyboard navigation, zoom, persisted rotation, reorder, and delete
 - Command-based overlay editing for text, freehand ink, rectangles, and redactions
 - Undo/redo with deterministic command history
 - Validated edited-PDF export for text, ink, rectangles, destructive redactions, and page rotation
 - Every export is reopened and rendered before download; repeat exports clone the source document
+- OPFS-first autosave with IndexedDB fallback, recent projects, and reload recovery
 - Responsive desktop/mobile shell and offline app manifest
 
-> This is an honest early vertical slice, not a finished release. Page-tree operations, persistence, Android packaging, forms, signatures, merge/split, and the full regression corpus remain on the roadmap.
+> This is an honest early vertical slice, not a finished release. Android packaging, forms, signatures, merge/split, crop, and the full regression corpus remain on the roadmap.
 
 ## Development
 

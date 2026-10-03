@@ -12,9 +12,13 @@
 - Clone the source for repeatable exports
 - Reopen, render, and structurally validate every export before download
 
-## Phase 2 — page operations and persistence
-- Reorder, rotate, delete, crop, merge, split
-- OPFS + IndexedDB autosave and crash recovery
+## Phase 2 — page operations and persistence (complete)
+- Undoable reorder, rotation, and deletion with validated export
+- OPFS-first source storage with IndexedDB Blob fallback
+- Debounced command snapshot autosave with Zod validation
+- Recent-project library, reload recovery, and local cleanup
+
+Crop, merge, and split move to Phase 3 alongside deeper document editing.
 
 ## Phase 3 — editing depth
 - Existing text replacement with explicit limitations

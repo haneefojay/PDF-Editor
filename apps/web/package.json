@@ -14,6 +14,7 @@
   "dependencies": {
     "@paperless/editor-core": "workspace:*",
     "@paperless/pdf-engine": "workspace:*",
+    "dexie": "^4.4.6",
     "lucide-react": "^0.545.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",

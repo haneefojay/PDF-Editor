@@ -147,13 +147,19 @@ class Engine implements PdfWorkerApi {
     // Bake visible annotations into page content so ordinary PDF readers retain
     // the edit even when annotation display is disabled.
     doc.bake(true, false);
+    const uniquePages = new Set(request.pageOrder);
+    if (request.pageOrder.length === 0 || uniquePages.size !== request.pageOrder.length || request.pageOrder.some((page) => page < 0 || page >= doc.countPages())) {
+      doc.destroy();
+      throw new Error("Export validation failed: page order is invalid.");
+    }
+    doc.rearrangePages(request.pageOrder);
     const saved = doc.saveToBuffer("garbage=4,compress=yes,clean=yes").asUint8Array();
     const bytes = new Uint8Array(saved.length);
     bytes.set(saved);
 
     // Structural validation: reopen the exact exported bytes and force a render.
     const verified = mupdf.Document.openDocument(bytes, "application/pdf");
-    if (!verified.isPDF() || verified.countPages() !== doc.countPages()) {
+    if (!verified.isPDF() || verified.countPages() !== request.pageOrder.length) {
       verified.destroy();
       throw new Error("Export validation failed: page structure changed unexpectedly.");
     }
