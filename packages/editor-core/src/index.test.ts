@@ -47,6 +47,14 @@ describe("commands", () => {
     expect(applyCommand(edited, inverseCommand(command)).overlays).toHaveLength(0);
   });
 
+  it("persists professional review metadata and flatten state", () => {
+    const parsed = EditorDocumentSchema.parse({
+      ...emptyDocument(1),
+      overlays: [{ id: "review", page: 0, kind: "markup", markup: "highlight", x: 0.1, y: 0.2, width: 0.4, height: 0.03, color: "#ffd84d", opacity: 0.35, author: "QA", createdAt: "2026-10-03T12:00:00.000Z", comment: "Confirm this clause", resolved: false, flatten: true }],
+    });
+    expect(parsed.overlays[0]).toMatchObject({ kind: "markup", author: "QA", flatten: true });
+  });
+
   it("rejects corrupt persisted snapshots", () => {
     expect(() => EditorDocumentSchema.parse({ schemaVersion: 1, overlays: [], rotations: {}, pageOrder: [0, -1] })).toThrow();
   });

@@ -27,7 +27,12 @@ export type ExportOverlay =
   | { id: string; page: number; kind: "shape"; shape: "rectangle" | "square" | "circle" | "triangle"; x: number; y: number; width: number; height: number; color: string; fillColor: string | null; strokeWidth: number }
   | { id: string; page: number; kind: "rect"; x: number; y: number; width: number; height: number; color: string }
   | { id: string; page: number; kind: "redact"; x: number; y: number; width: number; height: number; color: string }
-  | { id: string; page: number; kind: "image"; x: number; y: number; width: number; height: number; dataUrl: string };
+  | { id: string; page: number; kind: "image"; x: number; y: number; width: number; height: number; dataUrl: string }
+  | { id: string; page: number; kind: "markup"; markup: "highlight" | "underline" | "strikeout" | "squiggly"; x: number; y: number; width: number; height: number; color: string; opacity: number; author: string; createdAt: string; comment: string; resolved: boolean; flatten: boolean }
+  | { id: string; page: number; kind: "note"; noteType: "sticky" | "callout"; x: number; y: number; width: number; height: number; color: string; text: string; author: string; createdAt: string; comment: string; resolved: boolean; flatten: boolean }
+  | { id: string; page: number; kind: "stamp"; x: number; y: number; width: number; height: number; label: string; color: string; author: string; createdAt: string; comment: string; resolved: boolean; flatten: boolean }
+  | { id: string; page: number; kind: "attachment"; x: number; y: number; width: number; height: number; name: string; mimeType: string; dataUrl: string; author: string; createdAt: string; comment: string; resolved: boolean; flatten: boolean }
+  | { id: string; page: number; kind: "measurement"; measurement: "distance" | "perimeter" | "area"; points: { x: number; y: number }[]; color: string; unit: "pt" | "in" | "cm" | "mm"; scale: number; label: string; author: string; createdAt: string; comment: string; resolved: boolean; flatten: boolean };
 
 export type ExportRequest = {
   overlays: ExportOverlay[];

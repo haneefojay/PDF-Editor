@@ -47,6 +47,53 @@ const dataUrlBytes = (dataUrl: string) => {
   const raw = atob(encoded);
   return Uint8Array.from(raw, (char) => char.charCodeAt(0));
 };
+const appendPageCommands = (doc: Mupdf.PDFDocument, page: Mupdf.PDFPage, commands: string[]) => {
+  const pageObject = page.getObject();
+  const stream = doc.addStream(new TextEncoder().encode(["q", ...commands, "Q"].join("\n")), doc.newDictionary());
+  const contents = pageObject.get("Contents");
+  if (contents.isNull()) pageObject.put("Contents", stream);
+  else if (contents.resolve().isArray()) contents.resolve().push(stream);
+  else { const array = doc.newArray(); array.push(contents); array.push(stream); pageObject.put("Contents", array); }
+};
+const reviewMetadata = (annotation: Mupdf.PDFAnnotation, overlay: { id: string; author: string; createdAt: string; comment: string; resolved: boolean }) => {
+  annotation.setName(overlay.id);
+  annotation.setAuthor(overlay.author || "Paperless");
+  annotation.setContents(overlay.comment);
+  annotation.setSubject(overlay.resolved ? "Resolved review" : "Review");
+  const created = new Date(overlay.createdAt);
+  if (!Number.isNaN(created.valueOf())) { annotation.setCreationDate(created); annotation.setModificationDate(created); }
+  annotation.getObject().put("PaperlessResolved", overlay.resolved);
+  annotation.setFlags(mupdf.PDFAnnotation.IS_PRINT);
+};
+const flattenedReview = async (doc: Mupdf.PDFDocument, page: Mupdf.PDFPage, overlay: Extract<ExportOverlay, { kind: "markup" | "note" | "stamp" | "measurement" }>, resourceName: string) => {
+  const bounds = page.getBounds(); const pageWidth = bounds[2] - bounds[0]; const pageHeight = bounds[3] - bounds[1]; const color = toColor(overlay.color) as [number, number, number];
+  const rgb = `${color[0]} ${color[1]} ${color[2]}`; const point = (p: { x: number; y: number }) => [bounds[0] + p.x * pageWidth, bounds[3] - p.y * pageHeight] as const;
+  if (overlay.kind === "markup") {
+    const [x0, y0, x1, y1] = normalizedRect(overlay, bounds); const y = bounds[3] - y1; const width = x1 - x0; const height = y1 - y0;
+    if (overlay.markup === "highlight") {
+      const blended = color.map((value) => 1 - (1 - value) * overlay.opacity);
+      appendPageCommands(doc, page, [`${blended[0]} ${blended[1]} ${blended[2]} rg`, `${x0} ${y} ${width} ${height} re f`]);
+    }
+    else {
+      const lineY = overlay.markup === "strikeout" ? y + height / 2 : y + Math.max(1, height * 0.08);
+      if (overlay.markup === "squiggly") {
+        const commands = [`${rgb} RG`, `${Math.max(0.8, height / 14)} w`]; const step = Math.max(3, height / 4); let x = x0; let up = true; commands.push(`${x0} ${lineY} m`);
+        while (x < x1) { x = Math.min(x1, x + step); commands.push(`${x} ${lineY + (up ? step / 2 : 0)} l`); up = !up; }
+        commands.push("S"); appendPageCommands(doc, page, commands);
+      } else appendPageCommands(doc, page, [`${rgb} RG`, `${Math.max(0.8, height / 14)} w`, `${x0} ${lineY} m ${x1} ${lineY} l S`]);
+    }
+    return;
+  }
+  if (overlay.kind === "measurement") {
+    const commands = [`${rgb} RG`, "1.5 w"]; const [first, ...rest] = overlay.points; if (!first) return; const [x, y] = point(first); commands.push(`${x} ${y} m`); rest.forEach((item) => { const [px, py] = point(item); commands.push(`${px} ${py} l`); }); if (overlay.measurement !== "distance") commands.push("h"); commands.push("S"); appendPageCommands(doc, page, commands);
+    const anchor = overlay.points[Math.floor(overlay.points.length / 2)] ?? first;
+    await appendTextContent(doc, page, { id: overlay.id, page: overlay.page, kind: "text", x: anchor.x, y: anchor.y, width: 0.25, height: 0.04, text: overlay.label, size: 10, color: overlay.color, fontFamily: "Arial", fontName: "Arial", bold: true, italic: false, underline: false, alignment: "left", lineHeight: 1, letterSpacing: 0, fitMode: "shrink" }, resourceName);
+    return;
+  }
+  const x = overlay.x * pageWidth + bounds[0]; const height = overlay.height * pageHeight; const width = overlay.width * pageWidth; const y = bounds[3] - overlay.y * pageHeight - height;
+  appendPageCommands(doc, page, [`${rgb} RG`, `${overlay.kind === "note" ? "1 0.96 0.68" : "1 1 1"} rg`, "1.5 w", `${x} ${y} ${width} ${height} re B`]);
+  await appendTextContent(doc, page, { id: overlay.id, page: overlay.page, kind: "text", x: overlay.x + 0.01, y: overlay.y + 0.01, width: Math.max(0.02, overlay.width - 0.02), height: Math.max(0.02, overlay.height - 0.02), text: overlay.kind === "note" ? overlay.text : overlay.label, size: overlay.kind === "note" ? 10 : 12, color: overlay.color, fontFamily: "Arial", fontName: "Arial", bold: overlay.kind === "stamp", italic: false, underline: false, alignment: "center", lineHeight: 1.1, letterSpacing: 0, fitMode: "shrink" }, resourceName);
+};
 const extractedColor = (color: Mupdf.Color) => {
   const rgb = color.length === 1 ? [color[0]!, color[0]!, color[0]!] : color.length === 3 ? color : [0, 0, 0];
   return `#${rgb.slice(0, 3).map((value) => Math.round(Math.min(1, Math.max(0, value)) * 255).toString(16).padStart(2, "0")).join("")}`;
@@ -246,7 +293,9 @@ class Engine implements PdfWorkerApi {
     for (const overlay of request.overlays) {
       if (overlay.page < 0 || overlay.page >= doc.countPages()) continue;
       const page = doc.loadPage(overlay.page); const bounds = page.getBounds();
-      if (overlay.kind === "text") {
+      if ("flatten" in overlay && overlay.flatten && overlay.kind !== "attachment") {
+        await flattenedReview(doc, page, overlay, `PEF${annotationCount + 1}`); annotationCount += 1;
+      } else if (overlay.kind === "text") {
         textOverlays.push(overlay);
       } else if (overlay.kind === "ink" || overlay.kind === "signature") {
         const annotation = page.createAnnotation("Ink"); annotation.setInkList([overlay.points.map((point) => pagePoint(point, bounds))]); annotation.setColor(toColor(overlay.color)); annotation.setBorderWidth(overlay.width); annotation.setFlags(mupdf.PDFAnnotation.IS_PRINT); annotation.update(); annotation.destroy(); annotationCount += 1;
@@ -260,6 +309,28 @@ class Engine implements PdfWorkerApi {
         annotation.setColor(toColor(overlay.color)); if (overlay.fillColor) annotation.setInteriorColor(toColor(overlay.fillColor)); annotation.setBorderWidth(overlay.strokeWidth); annotation.setFlags(mupdf.PDFAnnotation.IS_PRINT); annotation.update(); annotation.destroy(); annotationCount += 1;
       } else if (overlay.kind === "image") {
         const image = new mupdf.Image(dataUrlBytes(overlay.dataUrl)); const annotation = page.createAnnotation("Stamp"); annotation.setRect(normalizedRect(overlay, bounds)); annotation.setStampImage(image); annotation.setFlags(mupdf.PDFAnnotation.IS_PRINT); annotation.update(); annotation.destroy(); image.destroy(); annotationCount += 1;
+      } else if (overlay.kind === "markup") {
+        const type = overlay.markup === "highlight" ? "Highlight" : overlay.markup === "underline" ? "Underline" : overlay.markup === "strikeout" ? "StrikeOut" : "Squiggly";
+        const annotation = page.createAnnotation(type); const rect = normalizedRect(overlay, bounds);
+        annotation.setQuadPoints([[rect[0], rect[1], rect[2], rect[1], rect[0], rect[3], rect[2], rect[3]]]);
+        annotation.setColor(toColor(overlay.color)); annotation.setOpacity(overlay.opacity); reviewMetadata(annotation, overlay); annotation.update(); annotation.destroy(); annotationCount += 1;
+      } else if (overlay.kind === "note") {
+        const annotation = page.createAnnotation(overlay.noteType === "sticky" ? "Text" : "FreeText"); annotation.setRect(normalizedRect(overlay, bounds));
+        reviewMetadata(annotation, { ...overlay, comment: overlay.comment || overlay.text });
+        if (overlay.noteType === "sticky") annotation.setIcon("Comment");
+        else { annotation.setDefaultAppearance("Helvetica", 11, toColor(overlay.color)); annotation.setIntent("FreeTextCallout"); annotation.setContents(overlay.text); }
+        annotation.setColor(toColor(overlay.color)); annotation.update(); annotation.destroy(); annotationCount += 1;
+      } else if (overlay.kind === "stamp") {
+        const annotation = page.createAnnotation("Stamp"); annotation.setRect(normalizedRect(overlay, bounds)); annotation.setIcon(overlay.label.replaceAll(" ", "")); annotation.setColor(toColor(overlay.color)); reviewMetadata(annotation, overlay); annotation.setContents(overlay.comment || overlay.label); annotation.update(); annotation.destroy(); annotationCount += 1;
+      } else if (overlay.kind === "attachment") {
+        const annotation = page.createAnnotation("FileAttachment"); annotation.setRect(normalizedRect(overlay, bounds)); annotation.setIcon("Paperclip");
+        const file = doc.addEmbeddedFile(overlay.name, overlay.mimeType || "application/octet-stream", dataUrlBytes(overlay.dataUrl), new Date(overlay.createdAt), new Date(overlay.createdAt), true);
+        annotation.setFileSpec(file); annotation.setColor(toColor("#d64b35")); reviewMetadata(annotation, overlay); annotation.update(); annotation.destroy(); annotationCount += 1;
+      } else if (overlay.kind === "measurement") {
+        const annotation = page.createAnnotation(overlay.measurement === "distance" ? "Line" : "Polygon"); const points = overlay.points.map((point) => pagePoint(point, bounds));
+        if (overlay.measurement === "distance") { annotation.setLine(points[0]!, points.at(-1)!); annotation.setIntent("LineDimension"); annotation.setLineEndingStyles("None", "OpenArrow"); annotation.setLineCaption(true); }
+        else { annotation.setVertices(points); annotation.setIntent("PolygonDimension"); }
+        annotation.setColor(toColor(overlay.color)); annotation.setBorderWidth(1.5); reviewMetadata(annotation, { ...overlay, comment: overlay.comment || overlay.label }); annotation.setContents(overlay.label); annotation.update(); annotation.destroy(); annotationCount += 1;
       } else if (overlay.kind === "redact") {
         const annotation = page.createAnnotation("Redact"); annotation.setRect(normalizedRect(overlay, bounds)); annotation.setFlags(mupdf.PDFAnnotation.IS_PRINT); annotation.update(); annotation.destroy(); pagesWithRedactions.add(overlay.page); redactionFills.push(overlay); redactionCount += 1;
       }

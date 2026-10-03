@@ -6,6 +6,13 @@ export const NormalizedRect = z.object({ x: z.number().min(0).max(1), y: z.numbe
 export type NormalizedRect = z.infer<typeof NormalizedRect>;
 export const Metadata = z.object({ title: z.string(), author: z.string(), subject: z.string(), keywords: z.string() });
 export type Metadata = z.infer<typeof Metadata>;
+const ReviewMetadata = {
+  author: z.string().default(""),
+  createdAt: z.string().default(""),
+  comment: z.string().default(""),
+  resolved: z.boolean().default(false),
+  flatten: z.boolean().default(false),
+};
 
 export const Overlay = z.discriminatedUnion("kind", [
   z.object({
@@ -35,9 +42,14 @@ export const Overlay = z.discriminatedUnion("kind", [
   z.object({ id: z.string(), page: z.number().int().nonnegative(), kind: z.literal("rect"), x: z.number(), y: z.number(), width: z.number().nonnegative(), height: z.number().nonnegative(), color: z.string() }),
   z.object({ id: z.string(), page: z.number().int().nonnegative(), kind: z.literal("redact"), x: z.number(), y: z.number(), width: z.number().nonnegative(), height: z.number().nonnegative(), color: z.string() }),
   z.object({ id: z.string(), page: z.number().int().nonnegative(), kind: z.literal("image"), x: z.number(), y: z.number(), width: z.number().positive(), height: z.number().positive(), dataUrl: z.string().startsWith("data:image/") }),
+  z.object({ id: z.string(), page: z.number().int().nonnegative(), kind: z.literal("markup"), markup: z.enum(["highlight", "underline", "strikeout", "squiggly"]), x: z.number(), y: z.number(), width: z.number().positive(), height: z.number().positive(), color: z.string(), opacity: z.number().min(0.05).max(1).default(0.35), ...ReviewMetadata }),
+  z.object({ id: z.string(), page: z.number().int().nonnegative(), kind: z.literal("note"), noteType: z.enum(["sticky", "callout"]), x: z.number(), y: z.number(), width: z.number().positive(), height: z.number().positive(), color: z.string(), text: z.string(), ...ReviewMetadata }),
+  z.object({ id: z.string(), page: z.number().int().nonnegative(), kind: z.literal("stamp"), x: z.number(), y: z.number(), width: z.number().positive(), height: z.number().positive(), label: z.string(), color: z.string(), ...ReviewMetadata }),
+  z.object({ id: z.string(), page: z.number().int().nonnegative(), kind: z.literal("attachment"), x: z.number(), y: z.number(), width: z.number().positive(), height: z.number().positive(), name: z.string(), mimeType: z.string(), dataUrl: z.string().startsWith("data:"), ...ReviewMetadata }),
+  z.object({ id: z.string(), page: z.number().int().nonnegative(), kind: z.literal("measurement"), measurement: z.enum(["distance", "perimeter", "area"]), points: z.array(Point).min(2), color: z.string(), unit: z.enum(["pt", "in", "cm", "mm"]), scale: z.number().positive(), label: z.string(), ...ReviewMetadata }),
 ]);
 export type Overlay = z.infer<typeof Overlay>;
-export type Tool = "select" | "text" | "ink" | "signature" | "shape" | "redact" | "crop";
+export type Tool = "select" | "text" | "ink" | "signature" | "shape" | "redact" | "crop" | "markup" | "note" | "stamp" | "attachment" | "measure";
 
 export const EditorDocumentSchema = z.object({
   schemaVersion: z.literal(1),

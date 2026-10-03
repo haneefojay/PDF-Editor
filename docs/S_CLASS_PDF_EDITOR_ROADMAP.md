@@ -52,10 +52,10 @@ Sources:
 
 ### Phase C — Professional annotation and review
 
-- [ ] Highlight, underline, strikeout, squiggly, callout, sticky note, stamp, and attachment tools.
-- [ ] Comment sidebar, author/date metadata, filtering, import/export, and resolved state.
-- [ ] Measurement tools and configurable presets.
-- [ ] Flatten selected annotations and print-safe appearance validation.
+- [x] Highlight, underline, strikeout, squiggly, callout, sticky note, stamp, and attachment tools.
+- [x] Comment sidebar, author/date metadata, filtering, import/export, and resolved state.
+- [x] Measurement tools and configurable presets.
+- [x] Flatten selected annotations and print-safe appearance validation.
 
 ### Phase D — Page, image, and layout tools
 
