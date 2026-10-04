@@ -1,2 +1,38 @@
-import * as Comlink from "comlink";import type { PdfWorkerApi } from "./protocol";export type {FormField,PageImage,PageInfo,PdfMetadata,PdfWorkerApi,PositionedTextLine} from "./protocol";
-export function createPdfEngine(){const worker=new Worker(new URL("./mupdf.worker.ts",import.meta.url),{type:"module",name:"mupdf-engine"});worker.addEventListener("error",event=>console.error("PDF worker error",event.message));const ready=new Promise<void>((resolve,reject)=>{const timeout=setTimeout(()=>reject(new Error("PDF engine initialization timed out")),30000);worker.addEventListener("message",event=>{if(event.data?.type==="PDF_ENGINE_READY"){clearTimeout(timeout);resolve()}},{once:true})});const api=Comlink.wrap<PdfWorkerApi>(worker);return {api,ready,terminate:()=>worker.terminate()}}
+import * as Comlink from "comlink";
+import type { PdfWorkerApi } from "./protocol";
+export type {
+  FormField,
+  PageImage,
+  PageInfo,
+  PdfMetadata,
+  PdfWorkerApi,
+  PositionedTextLine,
+  SignatureStatus,
+} from "./protocol";
+export function createPdfEngine() {
+  const worker = new Worker(new URL("./mupdf.worker.ts", import.meta.url), {
+    type: "module",
+    name: "mupdf-engine",
+  });
+  worker.addEventListener("error", (event) =>
+    console.error("PDF worker error", event.message),
+  );
+  const ready = new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(
+      () => reject(new Error("PDF engine initialization timed out")),
+      30000,
+    );
+    worker.addEventListener(
+      "message",
+      (event) => {
+        if (event.data?.type === "PDF_ENGINE_READY") {
+          clearTimeout(timeout);
+          resolve();
+        }
+      },
+      { once: true },
+    );
+  });
+  const api = Comlink.wrap<PdfWorkerApi>(worker);
+  return { api, ready, terminate: () => worker.terminate() };
+}

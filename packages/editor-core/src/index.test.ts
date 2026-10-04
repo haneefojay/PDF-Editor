@@ -1,71 +1,303 @@
 import { describe, expect, it } from "vitest";
-import { applyCommand, EditorDocumentSchema, emptyDocument, inverseCommand, normalizeRect, type Command } from "./index";
+import {
+  applyCommand,
+  EditorDocumentSchema,
+  emptyDocument,
+  inverseCommand,
+  normalizeRect,
+  type Command,
+} from "./index";
 
 describe("commands", () => {
   it("applies and reverses an add", () => {
-    const command: Command = { type: "add", overlay: { id: "1", page: 0, kind: "text", x: 0.1, y: 0.2, width: 0.3, height: 0.06, text: "Hello", size: 16, color: "#111", fontFamily: "Helvetica", fontName: "Helvetica", bold: false, italic: false, underline: false, alignment: "left", lineHeight: 1.2, letterSpacing: 0, fitMode: "auto" } };
+    const command: Command = {
+      type: "add",
+      overlay: {
+        id: "1",
+        page: 0,
+        kind: "text",
+        x: 0.1,
+        y: 0.2,
+        width: 0.3,
+        height: 0.06,
+        text: "Hello",
+        size: 16,
+        color: "#111",
+        fontFamily: "Helvetica",
+        fontName: "Helvetica",
+        bold: false,
+        italic: false,
+        underline: false,
+        alignment: "left",
+        lineHeight: 1.2,
+        letterSpacing: 0,
+        fitMode: "auto",
+      },
+    };
     const next = applyCommand(emptyDocument(1), command);
     expect(next.overlays).toHaveLength(1);
-    expect(applyCommand(next, inverseCommand(command)).overlays).toHaveLength(0);
+    expect(applyCommand(next, inverseCommand(command)).overlays).toHaveLength(
+      0,
+    );
   });
 
-  it("normalizes reverse drags", () => expect(normalizeRect({ x: 10, y: 20 }, { x: 2, y: 4 })).toEqual({ x: 2, y: 4, width: 8, height: 16 }));
+  it("normalizes reverse drags", () =>
+    expect(normalizeRect({ x: 10, y: 20 }, { x: 2, y: 4 })).toEqual({
+      x: 2,
+      y: 4,
+      width: 8,
+      height: 16,
+    }));
 
-  it("normalizes rotation", () => expect(applyCommand(emptyDocument(1), { type: "rotate", page: 0, before: 0, after: 450 }).rotations[0]).toBe(90));
+  it("normalizes rotation", () =>
+    expect(
+      applyCommand(emptyDocument(1), {
+        type: "rotate",
+        page: 0,
+        before: 0,
+        after: 450,
+      }).rotations[0],
+    ).toBe(90));
 
   it("reorders and restores pages", () => {
-    const command: Command = { type: "setPageOrder", before: [0, 1, 2], after: [2, 0, 1] };
+    const command: Command = {
+      type: "setPageOrder",
+      before: [0, 1, 2],
+      after: [2, 0, 1],
+    };
     const moved = applyCommand(emptyDocument(3), command);
     expect(moved.pageOrder).toEqual([2, 0, 1]);
-    expect(applyCommand(moved, inverseCommand(command)).pageOrder).toEqual([0, 1, 2]);
+    expect(applyCommand(moved, inverseCommand(command)).pageOrder).toEqual([
+      0, 1, 2,
+    ]);
   });
 
   it("applies and reverses crop", () => {
-    const command: Command = { type: "setCrop", page: 0, before: null, after: { x: 0.1, y: 0.1, width: 0.8, height: 0.8 } };
+    const command: Command = {
+      type: "setCrop",
+      page: 0,
+      before: null,
+      after: { x: 0.1, y: 0.1, width: 0.8, height: 0.8 },
+    };
     const cropped = applyCommand(emptyDocument(1), command);
     expect(cropped.crops[0]?.width).toBe(0.8);
-    expect(applyCommand(cropped, inverseCommand(command)).crops[0]).toBeUndefined();
+    expect(
+      applyCommand(cropped, inverseCommand(command)).crops[0],
+    ).toBeUndefined();
   });
 
   it("updates and restores an overlay", () => {
-    const before = { id: "shape", page: 0, kind: "shape", shape: "circle", x: 0.1, y: 0.1, width: 0.2, height: 0.2, color: "#111111", fillColor: null, strokeWidth: 2 } as const;
+    const before = {
+      id: "shape",
+      page: 0,
+      kind: "shape",
+      shape: "circle",
+      x: 0.1,
+      y: 0.1,
+      width: 0.2,
+      height: 0.2,
+      color: "#111111",
+      fillColor: null,
+      strokeWidth: 2,
+    } as const;
     const after = { ...before, x: 0.4 };
-    const seeded = applyCommand(emptyDocument(1), { type: "add", overlay: before });
+    const seeded = applyCommand(emptyDocument(1), {
+      type: "add",
+      overlay: before,
+    });
     const command: Command = { type: "updateOverlay", before, after };
-    expect(applyCommand(seeded, command).overlays[0]).toMatchObject({ kind: "shape", x: 0.4 });
-    expect(applyCommand(applyCommand(seeded, command), inverseCommand(command)).overlays[0]).toMatchObject({ kind: "shape", x: 0.1 });
+    expect(applyCommand(seeded, command).overlays[0]).toMatchObject({
+      kind: "shape",
+      x: 0.4,
+    });
+    expect(
+      applyCommand(applyCommand(seeded, command), inverseCommand(command))
+        .overlays[0],
+    ).toMatchObject({ kind: "shape", x: 0.1 });
   });
 
   it("adds and removes a replacement edit as one undoable command", () => {
     const overlays = [
-      { id: "erase", page: 0, kind: "redact", x: 0.1, y: 0.1, width: 0.4, height: 0.04, color: "#ffffff" },
-      { id: "replacement", page: 0, kind: "text", x: 0.1, y: 0.1, width: 0.4, height: 0.04, text: "Replacement", size: 12, color: "#111111", fontFamily: "Helvetica", fontName: "Helvetica", bold: false, italic: false, underline: false, alignment: "left", lineHeight: 1.2, letterSpacing: 0, fitMode: "auto" },
+      {
+        id: "erase",
+        page: 0,
+        kind: "redact",
+        x: 0.1,
+        y: 0.1,
+        width: 0.4,
+        height: 0.04,
+        color: "#ffffff",
+      },
+      {
+        id: "replacement",
+        page: 0,
+        kind: "text",
+        x: 0.1,
+        y: 0.1,
+        width: 0.4,
+        height: 0.04,
+        text: "Replacement",
+        size: 12,
+        color: "#111111",
+        fontFamily: "Helvetica",
+        fontName: "Helvetica",
+        bold: false,
+        italic: false,
+        underline: false,
+        alignment: "left",
+        lineHeight: 1.2,
+        letterSpacing: 0,
+        fitMode: "auto",
+      },
     ] as const;
     const command: Command = { type: "addMany", overlays: [...overlays] };
     const edited = applyCommand(emptyDocument(1), command);
     expect(edited.overlays).toHaveLength(2);
-    expect(applyCommand(edited, inverseCommand(command)).overlays).toHaveLength(0);
+    expect(applyCommand(edited, inverseCommand(command)).overlays).toHaveLength(
+      0,
+    );
   });
 
   it("persists professional review metadata and flatten state", () => {
     const parsed = EditorDocumentSchema.parse({
       ...emptyDocument(1),
-      overlays: [{ id: "review", page: 0, kind: "markup", markup: "highlight", x: 0.1, y: 0.2, width: 0.4, height: 0.03, color: "#ffd84d", opacity: 0.35, author: "QA", createdAt: "2026-10-03T12:00:00.000Z", comment: "Confirm this clause", resolved: false, flatten: true }],
+      overlays: [
+        {
+          id: "review",
+          page: 0,
+          kind: "markup",
+          markup: "highlight",
+          x: 0.1,
+          y: 0.2,
+          width: 0.4,
+          height: 0.03,
+          color: "#ffd84d",
+          opacity: 0.35,
+          author: "QA",
+          createdAt: "2026-10-03T12:00:00.000Z",
+          comment: "Confirm this clause",
+          resolved: false,
+          flatten: true,
+        },
+      ],
     });
-    expect(parsed.overlays[0]).toMatchObject({ kind: "markup", author: "QA", flatten: true });
+    expect(parsed.overlays[0]).toMatchObject({
+      kind: "markup",
+      author: "QA",
+      flatten: true,
+    });
   });
 
   it("reorders layered objects as one undoable command", () => {
-    const first = { id: "first", page: 0, kind: "image", x: 0.1, y: 0.1, width: 0.2, height: 0.2, dataUrl: "data:image/png;base64,AA==", opacity: 1, rotation: 0 } as const;
-    const second = { id: "second", page: 0, kind: "background", color: "#ffffff", opacity: 1 } as const;
+    const first = {
+      id: "first",
+      page: 0,
+      kind: "image",
+      x: 0.1,
+      y: 0.1,
+      width: 0.2,
+      height: 0.2,
+      dataUrl: "data:image/png;base64,AA==",
+      opacity: 1,
+      rotation: 0,
+    } as const;
+    const second = {
+      id: "second",
+      page: 0,
+      kind: "background",
+      color: "#ffffff",
+      opacity: 1,
+    } as const;
     const before = [first, second];
-    const command: Command = { type: "setOverlayOrder", before, after: [second, first] };
+    const command: Command = {
+      type: "setOverlayOrder",
+      before,
+      after: [second, first],
+    };
     const seeded = { ...emptyDocument(1), overlays: [...before] };
-    expect(applyCommand(seeded, command).overlays.map((item) => item.id)).toEqual(["second", "first"]);
-    expect(applyCommand(applyCommand(seeded, command), inverseCommand(command)).overlays.map((item) => item.id)).toEqual(["first", "second"]);
+    expect(
+      applyCommand(seeded, command).overlays.map((item) => item.id),
+    ).toEqual(["second", "first"]);
+    expect(
+      applyCommand(
+        applyCommand(seeded, command),
+        inverseCommand(command),
+      ).overlays.map((item) => item.id),
+    ).toEqual(["first", "second"]);
+  });
+
+  it("persists interactive form behavior", () => {
+    const parsed = EditorDocumentSchema.parse({
+      ...emptyDocument(1),
+      overlays: [
+        {
+          id: "email",
+          page: 0,
+          kind: "formField",
+          fieldType: "text",
+          x: 0.1,
+          y: 0.2,
+          width: 0.4,
+          height: 0.04,
+          name: "Email",
+          label: "Email address",
+          value: "",
+          options: [],
+          required: true,
+          readOnly: false,
+          multiline: false,
+          maxLength: 120,
+          validation: "email",
+          validationPattern: "",
+          calculation: "",
+          tabOrder: 1,
+          flatten: false,
+        },
+      ],
+    });
+    expect(parsed.overlays[0]).toMatchObject({
+      kind: "formField",
+      name: "Email",
+      validation: "email",
+      required: true,
+    });
+  });
+
+  it("persists visual digital-signature seals", () => {
+    const parsed = EditorDocumentSchema.parse({
+      ...emptyDocument(1),
+      overlays: [
+        {
+          id: "signature",
+          page: 0,
+          kind: "visualSignature",
+          mode: "digital",
+          x: 0.1,
+          y: 0.75,
+          width: 0.35,
+          height: 0.08,
+          text: "Digitally signed by QA",
+          color: "#171714",
+          signer: "QA",
+          signedAt: "2026-10-04T09:00:00.000Z",
+        },
+      ],
+    });
+    expect(parsed.overlays[0]).toMatchObject({
+      kind: "visualSignature",
+      mode: "digital",
+      signer: "QA",
+    });
   });
 
   it("rejects corrupt persisted snapshots", () => {
-    expect(() => EditorDocumentSchema.parse({ schemaVersion: 1, overlays: [], rotations: {}, pageOrder: [0, -1] })).toThrow();
+    expect(() =>
+      EditorDocumentSchema.parse({
+        schemaVersion: 1,
+        overlays: [],
+        rotations: {},
+        pageOrder: [0, -1],
+      }),
+    ).toThrow();
   });
 });

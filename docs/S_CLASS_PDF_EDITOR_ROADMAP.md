@@ -14,6 +14,7 @@ Official product pages consistently converge on these capabilities:
 - Xodo: cross-platform editing, annotation, crop, forms/signing, OCR, conversion, encryption, and offline batch tools.
 
 Sources:
+
 - https://www.wps.com/feature/edit-pdf
 - https://www.wps.com/feature/free-pdf-open-app
 - https://helpx.adobe.com/au/acrobat/using/edit-text-pdfs.html
@@ -66,10 +67,10 @@ Sources:
 
 ### Phase E — Forms, signatures, and security
 
-- [ ] Create and edit form fields, validation, tab order, calculations, and flattening.
-- [ ] Typed/drawn/image signatures plus certificate-backed digital signatures.
-- [ ] Password encryption, permissions, metadata sanitation, and secure redaction audit.
-- [ ] Signature validation and explicit warnings when an edit invalidates a signature.
+- [x] Create and edit form fields, validation, tab order, calculations, and flattening.
+- [x] Typed/drawn/image signatures plus certificate-backed digital signatures.
+- [x] Password encryption, permissions, metadata sanitation, and secure redaction audit.
+- [x] Signature validation and explicit warnings when an edit invalidates a signature.
 
 ### Phase F — Conversion, accessibility, and automation
 
