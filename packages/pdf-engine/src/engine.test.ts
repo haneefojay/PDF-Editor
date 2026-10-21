@@ -234,6 +234,9 @@ describe("text export", () => {
     );
     expect(pageText(result.bytes)).toContain("Hidden layer");
     expect(darkness(result.bytes, { x: 0.1, y: 0.1, width: 0.3, height: 0.04 })).toBeLessThan(0.01);
+    // Stretched to cover its whole box, like the scanned words it represents.
+    const found = findText(result.bytes, "Hidden layer");
+    expect(found!.right).toBeCloseTo(0.6, 1);
   });
 });
 

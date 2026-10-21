@@ -756,6 +756,8 @@ details.more > div label {
 }
 .stage {
   overflow: auto;
+  /* Pinch zooms the document, not the whole app. */
+  touch-action: pan-x pan-y;
   background: var(--stage);
   overscroll-behavior: contain;
 }
@@ -969,7 +971,6 @@ details.more > div label {
   text-transform: uppercase;
   letter-spacing: 0.06em;
   background: #ffffffb3;
-  transform: rotate(-4deg);
 }
 .measureLabel {
   transform: translateY(-115%);

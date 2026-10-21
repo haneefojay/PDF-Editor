@@ -493,6 +493,10 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
       const startX = x;
       commands.push("BT", spec.invisible ? "3 Tr" : "0 Tr");
       commands.push(`${num(spec.letterSpacing)} Tc`);
+      // Invisible OCR text is stretched over the recognised words so that
+      // selecting it matches the scanned image underneath.
+      const stretch = spec.invisible && lineWidth > 0 && layout.lines.length === 1 ? (boxWidth / lineWidth) * 100 : 100;
+      commands.push(`${num(stretch)} Tz`);
       let cursor = 0;
       while (cursor < glyphs.length) {
         const fontIndex = glyphs[cursor]!.fontIndex;
@@ -511,7 +515,7 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
         let width = 0;
         for (const glyph of run) {
           hex += glyph.gid.toString(16).padStart(4, "0");
-          width += font.advanceGlyph(glyph.gid) * size + spec.letterSpacing;
+          width += (font.advanceGlyph(glyph.gid) * size + spec.letterSpacing) * (stretch / 100);
           if (glyph.character === " " && justify) {
             parts.push(`<${hex}>`, num((-justify / size) * 1000));
             hex = "";
@@ -881,7 +885,11 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
           if (value !== undefined && !widget.isReadOnly() && value !== widget.getValue()) {
             if (widget.isText()) widget.setTextValue(value);
             else if (widget.isChoice()) widget.setChoiceValue(value);
-            else if (widget.isCheckbox() || widget.isRadioButton()) widget.toggle();
+            else if (widget.isCheckbox() || widget.isRadioButton()) {
+              // On-states are named per field ("Yes", "On", …); compare on/off only.
+              const isOn = (state: string) => state !== "" && state !== "Off";
+              if (isOn(value) !== isOn(widget.getValue())) widget.toggle();
+            }
             widget.update();
           }
           widget.destroy();

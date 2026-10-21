@@ -155,3 +155,13 @@ test("keyboard shortcuts edit, undo and delete objects", async ({ page }) => {
   await page.keyboard.press("Control+z");
   await expect(boxes).toHaveCount(0);
 });
+
+test("keeps an unfinished text edit when changing page", async ({ page }) => {
+  await openSample(page);
+  await page.getByRole("button", { name: "Edit PDF text: South" }).click();
+  await page.getByRole("textbox", { name: "Edit original PDF text" }).fill("Southwest");
+  await page.getByRole("button", { name: "Next page" }).click();
+  await expect(page.locator(".pageInput")).toHaveValue("2");
+  const pdf = inspectPdf(await exportPdf(page));
+  expect(pdf.pages[0]!.text).toContain("Southwest");
+});
