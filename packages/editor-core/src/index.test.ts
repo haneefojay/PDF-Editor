@@ -301,3 +301,18 @@ describe("commands", () => {
     ).toThrow();
   });
 });
+
+describe("batch commands", () => {
+  it("applies in order and reverses in reverse order", () => {
+    const command: Command = {
+      type: "batch",
+      commands: [
+        { type: "setPageOrder", before: [0, 1], after: [0, 1, 2] },
+        { type: "setPageOrder", before: [0, 1, 2], after: [2, 0, 1] },
+      ],
+    };
+    const applied = applyCommand(emptyDocument(2), command);
+    expect(applied.pageOrder).toEqual([2, 0, 1]);
+    expect(applyCommand(applied, inverseCommand(command)).pageOrder).toEqual([0, 1]);
+  });
+});

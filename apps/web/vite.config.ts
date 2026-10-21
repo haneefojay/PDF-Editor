@@ -1,1 +1,26 @@
-import {defineConfig} from "vite";import react from "@vitejs/plugin-react";export default defineConfig({plugins:[react()],server:{headers:{"Cross-Origin-Opener-Policy":"same-origin","Cross-Origin-Embedder-Policy":"require-corp"}},worker:{format:"es"},optimizeDeps:{exclude:["mupdf"]},build:{target:"esnext",rollupOptions:{output:{assetFileNames:(asset)=>asset.name?.endsWith(".traineddata.gz")?"assets/tessdata/[name][extname]":"assets/[name]-[hash][extname]"}}}});
+/// <reference types="vitest/config" />
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    headers: {
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Cross-Origin-Embedder-Policy": "require-corp",
+    },
+  },
+  worker: { format: "es" },
+  optimizeDeps: { exclude: ["mupdf"] },
+  build: {
+    target: "esnext",
+    rollupOptions: {
+      output: {
+        assetFileNames: (asset) =>
+          asset.name?.endsWith(".traineddata.gz") ? "assets/tessdata/[name][extname]" : "assets/[name]-[hash][extname]",
+      },
+    },
+  },
+  // Browser end-to-end specs in e2e/ run with Playwright, not Vitest.
+  test: { include: ["src/**/*.test.ts"] },
+});
