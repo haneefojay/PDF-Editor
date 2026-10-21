@@ -367,3 +367,39 @@ describe("text extraction", () => {
     expect(line!.y).toBeLessThan(line!.baseline);
   });
 });
+
+describe("images to PDF", () => {
+  // A 200×100 grey PNG.
+  const pixmap = new mupdf.Pixmap(mupdf.ColorSpace.DeviceRGB, [0, 0, 200, 100], false);
+  pixmap.clear(128);
+  const png = new Uint8Array(pixmap.asPNG()).buffer;
+
+  it("creates one fitted page per image", async () => {
+    const engine = createEngine(mupdf);
+    const bytes = await engine.createFromImages([png, png]);
+    const doc = mupdf.Document.openDocument(bytes, "application/pdf");
+    expect(doc.countPages()).toBe(2);
+    expect(doc.loadPage(0).getBounds()).toEqual([0, 0, 842, 595]);
+    doc.destroy();
+  });
+
+  it("appends images as pages to an open document", async () => {
+    const engine = await engineWith(makePdf([{}]));
+    const result = await engine.appendPages({ type: "images", images: [png] });
+    expect(result.firstIndex).toBe(1);
+    expect(result.count).toBe(1);
+  });
+});
+
+describe("conversion helpers", () => {
+  it("renders and reads text from exported bytes", async () => {
+    const engine = await engineWith(makePdf([{ content: "BT /F1 18 Tf 60 560 Td (Original) Tj ET" }, {}]));
+    const exported = await engine.exportDocument(request({ overlays: [textOverlay("Added", 0.1, 0.1)], pageOrder: [0, 1] }));
+    const text = await engine.textOfBytes(exported.bytes);
+    expect(text).toHaveLength(2);
+    expect(text[0]).toContain("Original");
+    expect(text[0]).toContain("Added");
+    const png = await engine.renderBytes(exported.bytes, 0, 0.5);
+    expect([...png.slice(1, 4)].map((c) => String.fromCharCode(c)).join("")).toBe("PNG");
+  });
+});

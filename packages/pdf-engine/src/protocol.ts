@@ -102,6 +102,7 @@ export type DocumentInfo = {
 
 export type AppendOperation =
   | { type: "blank"; width: number; height: number }
+  | { type: "images"; images: ArrayBuffer[] }
   | { type: "copy"; source: number }
   | { type: "pdf"; bytes: ArrayBuffer; password?: string };
 
@@ -128,5 +129,11 @@ export interface PdfWorkerApi {
    * page insertion stays undoable through the page order.
    */
   appendPages(operation: AppendOperation): Promise<AppendResult>;
+  /** Builds a new PDF with one page per image (PNG or JPEG), fitted to A4. */
+  createFromImages(images: ArrayBuffer[]): Promise<Uint8Array>;
+  /** Renders a page of another PDF (such as an export) without opening it. */
+  renderBytes(bytes: Uint8Array, index: number, scale: number): Promise<Uint8Array>;
+  /** Plain text of every page of another PDF, one string per page. */
+  textOfBytes(bytes: Uint8Array): Promise<string[]>;
   destroy(): Promise<void>;
 }

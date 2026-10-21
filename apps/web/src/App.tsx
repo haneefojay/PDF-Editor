@@ -34,6 +34,7 @@ import {
   Highlighter,
   ImageDown,
   ImagePlus,
+  Images,
   Info,
   Italic,
   Keyboard,
@@ -50,6 +51,7 @@ import {
   Paperclip,
   PenLine,
   Pencil,
+  Printer,
   Redo2,
   RotateCcw,
   RotateCw,
@@ -91,13 +93,13 @@ import {
 } from "@paperless/editor-core";
 import { deleteProject, listProjects, loadProject, saveProject, type ProjectSummary } from "./persistence";
 import { MAX_ZOOM, MIN_ZOOM, useEditor } from "./store";
-import { configureNativeUi, registerBackHandler, savePdf } from "./platform";
+import { configureNativeUi, isNativePlatform, registerBackHandler, savePdf } from "./platform";
 import { createOcrRecognizer, ocrLanguages, type OcrLanguage, type ScanEnhancement } from "./ocr";
 import { signPdfWithCertificate } from "./digital-signature";
 import { PageCanvas, type CanvasSettings, type MarkupKind, type OriginalEdit, type ShapeKind } from "./PageCanvas";
 import { exportFontName, fitTextBox, fontCategory, layoutStyled, topForBaseline, usePreviewFonts } from "./textMetrics";
 import { Modal, NumberField, Toast } from "./ui";
-import { downloadBlob, readAsDataUrl } from "./files";
+import { dataUrlToBlob, downloadBlob, readAsDataUrl } from "./files";
 import { boundsOf } from "./geometry";
 import { layoutOverlays } from "./layout";
 
@@ -182,6 +184,7 @@ export function App() {
     nativeReplace: useRef<HTMLInputElement>(null),
     certificate: useRef<HTMLInputElement>(null),
     signatureImage: useRef<HTMLInputElement>(null),
+    imagePages: useRef<HTMLInputElement>(null),
   };
   const stageRef = useRef<HTMLDivElement>(null);
   const pinch = useRef<{ distance: number; zoom: number; contentX: number; contentY: number; offsetX: number; offsetY: number } | null>(null);
@@ -405,6 +408,29 @@ export function App() {
       await openBytes({ id: crypto.randomUUID(), name: file.name, bytes: await file.arrayBuffer() });
     },
     [openBytes],
+  );
+
+  const createFromImages = useCallback(
+    async (files: File[]) => {
+      const images = files.filter((file) => /^image\/(png|jpe?g)$/.test(file.type));
+      if (!images.length) {
+        setError("Choose PNG or JPEG images.");
+        return;
+      }
+      setBusy(`Creating a PDF from ${images.length} image${images.length === 1 ? "" : "s"}…`);
+      setError("");
+      try {
+        await withTimeout(engine.current!.ready, 20_000, "The PDF engine took too long to start.");
+        const created = await engine.current!.api.createFromImages(await Promise.all(images.map((file) => file.arrayBuffer())));
+        const bytes = new Uint8Array(created.byteLength);
+        bytes.set(created);
+        await openBytes({ id: crypto.randomUUID(), name: `${images[0]!.name.replace(/\.[^.]+$/, "")}.pdf`, bytes: bytes.buffer });
+      } catch (cause) {
+        fail(cause, "The images could not be converted.");
+        setBusy("");
+      }
+    },
+    [openBytes, fail],
   );
 
   // Installed as an app, PDFs opened from the OS arrive through the launch queue.
@@ -713,6 +739,74 @@ export function App() {
     }
   };
 
+  /** The current document with all edits applied, never password protected. */
+  const renderedExport = async (order = doc.pageOrder) => {
+    const result = await withTimeout(api().exportDocument({ ...exportRequest({ pageOrder: order }), encryption: undefined }), 120_000, "Preparing the document took too long.");
+    return result.bytes;
+  };
+  const printDocument = async () => {
+    if (!open) return;
+    setBusy("Preparing to print…");
+    setError("");
+    try {
+      const bytes = await renderedExport();
+      if (isNativePlatform) {
+        await savePdf(bytes, `${baseName(open.name)}-print.pdf`);
+        return;
+      }
+      const copy = new Uint8Array(bytes.byteLength);
+      copy.set(bytes);
+      const url = URL.createObjectURL(new Blob([copy.buffer], { type: "application/pdf" }));
+      const frame = document.createElement("iframe");
+      frame.className = "printFrame";
+      frame.src = url;
+      frame.onload = () => {
+        try {
+          frame.contentWindow?.focus();
+          frame.contentWindow?.print();
+        } catch {
+          window.open(url, "_blank");
+        }
+        setTimeout(() => {
+          frame.remove();
+          URL.revokeObjectURL(url);
+        }, 120_000);
+      };
+      document.body.append(frame);
+    } catch (cause) {
+      fail(cause, "The document could not be prepared for printing.");
+    } finally {
+      setBusy("");
+    }
+  };
+  const savePageImage = async () => {
+    if (!open) return;
+    setBusy("Rendering image…");
+    try {
+      const png = await api().renderBytes(await renderedExport([sourcePage]), 0, 200 / 72);
+      const message = await downloadBlob(new Blob([new Uint8Array(png)], { type: "image/png" }), `${baseName(open.name)}-page-${page + 1}.png`);
+      setNotice(`Page ${page + 1} saved as a 200 dpi PNG. ${message}.`);
+    } catch (cause) {
+      fail(cause, "The page could not be saved as an image.");
+    } finally {
+      setBusy("");
+    }
+  };
+  const exportText = async () => {
+    if (!open) return;
+    setBusy("Extracting text…");
+    try {
+      const pages = await api().textOfBytes(await renderedExport());
+      const text = pages.map((content, index) => `--- Page ${index + 1} ---\n${content.trim()}`).join("\n\n");
+      const message = await downloadBlob(new Blob([text], { type: "text/plain" }), `${baseName(open.name)}.txt`);
+      setNotice(`Text of ${pages.length} page${pages.length === 1 ? "" : "s"} saved. ${message}.`);
+    } catch (cause) {
+      fail(cause, "Text export failed.");
+    } finally {
+      setBusy("");
+    }
+  };
+
   /** Adds pages to the source and splices them into the page order (undoable). */
   const appendPages = async (operation: AppendOperation, at: number, message: string, copyOverlaysFrom?: number) => {
     if (!open) return;
@@ -860,7 +954,7 @@ export function App() {
 
   const exportReviews = () => {
     const payload = JSON.stringify({ format: "paperless-review-v1", document: open?.name ?? "", exportedAt: new Date().toISOString(), annotations: doc.overlays.filter(isReviewOverlay) }, null, 2);
-    downloadBlob(new Blob([payload], { type: "application/json" }), `${baseName(open?.name ?? "document")}-review.json`);
+    void downloadBlob(new Blob([payload], { type: "application/json" }), `${baseName(open?.name ?? "document")}-review.json`);
   };
   const importReviews = async (file: File) => {
     try {
@@ -884,10 +978,7 @@ export function App() {
   };
   const extractSelectedImage = () => {
     if (selected?.kind !== "image") return;
-    const anchor = document.createElement("a");
-    anchor.href = selected.dataUrl;
-    anchor.download = selected.name || "image.png";
-    anchor.click();
+    void downloadBlob(dataUrlToBlob(selected.dataUrl), selected.name || "image.png");
   };
   const openNativeImages = async () => {
     setBusy("Finding images…");
@@ -1205,6 +1296,10 @@ export function App() {
     event.preventDefault();
     const file = event.dataTransfer.files[0];
     if (!file) return;
+    if (!open && /^image\//.test(file.type)) {
+      void createFromImages([...event.dataTransfer.files]);
+      return;
+    }
     if (open && /^image\//.test(file.type)) void addImage(file);
     else if (open && file.name.toLowerCase().endsWith(".pdf")) void file.arrayBuffer().then((bytes) => appendPages({ type: "pdf", bytes }, doc.pageOrder.length, `${file.name} added at the end.`));
     else void load(file);
@@ -1239,8 +1334,34 @@ export function App() {
   useEffect(() => {
     const stage = stageRef.current;
     if (!stage) return;
+    let overscroll = 0;
+    let overscrollTimer = 0;
+    // Momentum scrolling must not skip several pages after a flip.
+    let flippedAt = 0;
     const wheel = (event: WheelEvent) => {
-      if (!event.ctrlKey && !event.metaKey) return;
+      if (!event.ctrlKey && !event.metaKey) {
+        // Keep scrolling past the end of a page to reach the next one.
+        const { page: currentPage, doc: currentDoc, setPage: goTo } = useEditor.getState();
+        const atBottom = stage.scrollTop + stage.clientHeight >= stage.scrollHeight - 2;
+        const atTop = stage.scrollTop <= 0;
+        if (performance.now() - flippedAt < 600) return;
+        if ((event.deltaY > 0 && atBottom && currentPage < currentDoc.pageOrder.length - 1) || (event.deltaY < 0 && atTop && currentPage > 0)) {
+          if (Math.sign(overscroll) !== Math.sign(event.deltaY)) overscroll = 0;
+          overscroll += event.deltaY;
+          window.clearTimeout(overscrollTimer);
+          overscrollTimer = window.setTimeout(() => (overscroll = 0), 400);
+          if (Math.abs(overscroll) > 220) {
+            const forward = overscroll > 0;
+            overscroll = 0;
+            flippedAt = performance.now();
+            goTo(currentPage + (forward ? 1 : -1));
+            requestAnimationFrame(() => {
+              stage.scrollTop = forward ? 0 : stage.scrollHeight;
+            });
+          }
+        } else overscroll = 0;
+        return;
+      }
       event.preventDefault();
       const current = useEditor.getState().zoom;
       const next = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, current * Math.exp(-event.deltaY * 0.0025)));
@@ -1282,6 +1403,11 @@ export function App() {
       if (mod && lower === "f") {
         event.preventDefault();
         setDialog("find");
+        return;
+      }
+      if (mod && lower === "p") {
+        event.preventDefault();
+        void printDocument();
         return;
       }
       if (isTyping(event.target) || dialog) return;
@@ -1426,7 +1552,22 @@ export function App() {
             Open a PDF
             <input aria-label="Open PDF" type="file" accept="application/pdf,.pdf" onChange={pickFile(load)} />
           </label>
-          <p className="dropcopy">or drop a PDF anywhere on this page</p>
+          <label className="secondaryButton">
+            <Images />
+            Create a PDF from images
+            <input
+              aria-label="Create PDF from images"
+              type="file"
+              multiple
+              accept="image/png,image/jpeg"
+              onChange={(event) => {
+                const files = [...(event.target.files ?? [])];
+                event.target.value = "";
+                void createFromImages(files);
+              }}
+            />
+          </label>
+          <p className="dropcopy">or drop a PDF or photos anywhere on this page</p>
           {busy && (
             <p className="busyLine" role="status">
               <span className="spinner" /> {busy}
@@ -1518,7 +1659,9 @@ export function App() {
         { key: "blank", label: "Blank page", Icon: FilePlus2, action: () => void appendPages({ type: "blank", width: pageInfo.width, height: pageInfo.height }, page + 1, "Blank page inserted.") },
         { key: "duplicate", label: "Duplicate page", Icon: Copy, action: () => void appendPages({ type: "copy", source: sourcePage }, page + 1, "Page duplicated with its edits.", sourcePage) },
         { key: "insert", label: "Insert PDF", Icon: Merge, action: () => inputs.insertPdf.current?.click(), title: "Insert another PDF after this page" },
+        { key: "imagePages", label: "Images as pages", Icon: Images, action: () => inputs.imagePages.current?.click(), title: "Insert photos or scans as new pages" },
         { key: "merge", label: "Append PDF", Icon: FileOutput, action: () => inputs.merge.current?.click(), title: "Add another PDF at the end" },
+        { key: "pageImage", label: "Page to image", Icon: ImageDown, action: () => void savePageImage(), title: "Save this page as a PNG image" },
         { key: "extract", label: "Extract page", Icon: FileOutput, action: () => void exportPages([sourcePage], `${baseName(open.name)}-page-${page + 1}.pdf`, `Page ${page + 1} exported.`), title: "Save this page as its own PDF" },
         { key: "layout", label: "Header & footer", Icon: LayoutTemplate, action: openLayout, title: "Headers, footers, page numbers, watermark, Bates numbering" },
         { key: "deletePage", label: "Delete page", Icon: Trash2, action: () => removePages([page]), disabled: doc.pageOrder.length < 2 },
@@ -1529,6 +1672,8 @@ export function App() {
       label: "Tools",
       items: [
         { key: "find", label: "Find & replace", Icon: Search, action: () => setDialog("find") },
+        { key: "print", label: "Print", Icon: Printer, action: () => void printDocument(), title: "Print with all edits (Ctrl+P)" },
+        { key: "text", label: "Export text", Icon: FileText, action: () => void exportText(), title: "Save all text as a .txt file" },
         { key: "ocr", label: "OCR scan", Icon: ScanText, action: () => { setOcrProgress(""); setDialog("ocr"); }, title: "Recognise text in scanned pages" },
         { key: "security", label: "Protect", Icon: Lock, action: () => setDialog("security"), title: "Passwords, permissions and digital signatures" },
         { key: "compress", label: "Compress", Icon: ImageDown, action: () => { setCompressionEstimate(null); setDialog("compress"); } },
@@ -1895,6 +2040,18 @@ export function App() {
       <input ref={inputs.insertPdf} hidden type="file" accept="application/pdf,.pdf" onChange={pickFile((file) => file.arrayBuffer().then((bytes) => appendPages({ type: "pdf", bytes }, page + 1, `${file.name} inserted.`)))} />
       <input ref={inputs.replaceImage} hidden type="file" accept="image/png,image/jpeg" onChange={pickFile(replaceSelectedImage)} />
       <input ref={inputs.nativeReplace} hidden type="file" accept="image/png,image/jpeg" onChange={pickFile(replaceNativeImage)} />
+      <input
+        ref={inputs.imagePages}
+        hidden
+        type="file"
+        multiple
+        accept="image/png,image/jpeg"
+        onChange={(event) => {
+          const files = [...(event.target.files ?? [])];
+          event.target.value = "";
+          if (files.length) void Promise.all(files.map((file) => file.arrayBuffer())).then((images) => appendPages({ type: "images", images }, page + 1, `${files.length} image page${files.length === 1 ? "" : "s"} inserted.`));
+        }}
+      />
       <input ref={inputs.reviewImport} hidden type="file" accept="application/json,.json" onChange={pickFile(importReviews)} />
       <input ref={inputs.signatureImage} hidden type="file" accept="image/png,image/jpeg" onChange={pickFile(async (file) => updateSettings({ signatureImage: await readAsDataUrl(file) }))} />
       <input ref={inputs.certificate} hidden type="file" accept=".p12,.pfx,application/x-pkcs12" onChange={pickFile(async (file) => setCertificate({ name: file.name, bytes: new Uint8Array(await file.arrayBuffer()) }))} />
@@ -2382,7 +2539,7 @@ export function App() {
               <span>
                 {lastAudit.areas} area{lastAudit.areas === 1 ? "" : "s"} across {lastAudit.pages.length} page{lastAudit.pages.length === 1 ? "" : "s"} · export verified
               </span>
-              <button onClick={() => downloadBlob(new Blob([JSON.stringify(lastAudit, null, 2)], { type: "application/json" }), `${baseName(open.name)}-redaction-audit.json`)}>Download audit</button>
+              <button onClick={() => void downloadBlob(new Blob([JSON.stringify(lastAudit, null, 2)], { type: "application/json" }), `${baseName(open.name)}-redaction-audit.json`)}>Download audit</button>
             </div>
           )}
         </Modal>
@@ -2399,7 +2556,7 @@ export function App() {
                     {item.pixelWidth} × {item.pixelHeight}px
                   </span>
                   <div>
-                    <button onClick={() => { const anchor = document.createElement("a"); anchor.href = item.dataUrl; anchor.download = `page-${page + 1}-image-${index + 1}.png`; anchor.click(); }}>Save</button>
+                    <button onClick={() => void downloadBlob(dataUrlToBlob(item.dataUrl), `page-${page + 1}-image-${index + 1}.png`)}>Save</button>
                     <button onClick={() => { setNativeReplace(item); inputs.nativeReplace.current?.click(); }}>Replace</button>
                   </div>
                 </article>
@@ -2704,6 +2861,7 @@ export function App() {
               ["Ctrl+Z / Ctrl+Shift+Z", "Undo / redo"],
               ["Ctrl+S", "Export PDF"],
               ["Ctrl+F", "Find & replace"],
+              ["Ctrl+P", "Print"],
               ["Ctrl + / Ctrl − / Ctrl+0", "Zoom in / out / fit width"],
               ["Ctrl + scroll, pinch", "Zoom"],
               ["← → / PgUp PgDn / Home End", "Change page"],
