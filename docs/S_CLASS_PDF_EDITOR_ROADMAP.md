@@ -74,7 +74,7 @@ Sources:
 
 ### Phase F — Conversion, accessibility, and automation
 
-- [ ] PDF ↔ Word/image/text conversion with layout validation.
+- [ ] PDF ↔ Word/image/text conversion with layout validation. (Images → PDF, page → image and PDF → text are done; Word is not.)
 - [ ] Tagged PDF structure, reading order, alt text, language, and accessibility checks.
 - [ ] Compare documents and generate a change report.
 - [ ] Batch operations, reusable presets, and optional local AI assistance.

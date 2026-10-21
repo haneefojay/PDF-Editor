@@ -1,3 +1,5 @@
+import type { Overlay } from "@paperless/editor-core";
+
 export type PageInfo = { width: number; height: number };
 export type NormalizedRect = {
   x: number;
@@ -43,6 +45,8 @@ export type PositionedTextLine = {
   y: number;
   width: number;
   height: number;
+  /** Normalized y of the text baseline. */
+  baseline: number;
   size: number;
   color: string;
   fontFamily: string;
@@ -55,216 +59,8 @@ export type PositionedTextLine = {
   fitMode: "auto" | "shrink" | "overflow";
 };
 
-export type ExportOverlay =
-  | {
-      id: string;
-      page: number;
-      kind: "text";
-      x: number;
-      y: number;
-      width: number;
-      height: number;
-      text: string;
-      size: number;
-      color: string;
-      fontFamily: string;
-      fontName: string | null;
-      bold: boolean;
-      italic: boolean;
-      underline: boolean;
-      alignment: "left" | "center" | "right" | "justify";
-      lineHeight: number;
-      letterSpacing: number;
-      fitMode: "auto" | "shrink" | "overflow";
-      invisible?: boolean;
-      ocrConfidence?: number;
-      ocrSource?: boolean;
-      opacity?: number;
-      rotation?: number;
-      layoutRole?: "header" | "footer" | "watermark" | "bates";
-    }
-  | {
-      id: string;
-      page: number;
-      kind: "ink" | "signature";
-      points: { x: number; y: number }[];
-      color: string;
-      width: number;
-    }
-  | {
-      id: string;
-      page: number;
-      kind: "shape";
-      shape: "rectangle" | "square" | "circle" | "triangle";
-      x: number;
-      y: number;
-      width: number;
-      height: number;
-      color: string;
-      fillColor: string | null;
-      strokeWidth: number;
-    }
-  | {
-      id: string;
-      page: number;
-      kind: "rect";
-      x: number;
-      y: number;
-      width: number;
-      height: number;
-      color: string;
-    }
-  | {
-      id: string;
-      page: number;
-      kind: "redact";
-      x: number;
-      y: number;
-      width: number;
-      height: number;
-      color: string;
-    }
-  | {
-      id: string;
-      page: number;
-      kind: "image";
-      x: number;
-      y: number;
-      width: number;
-      height: number;
-      dataUrl: string;
-      name?: string;
-      opacity: number;
-      rotation: number;
-    }
-  | {
-      id: string;
-      page: number;
-      kind: "background";
-      color: string;
-      opacity: number;
-    }
-  | {
-      id: string;
-      page: number;
-      kind: "markup";
-      markup: "highlight" | "underline" | "strikeout" | "squiggly";
-      x: number;
-      y: number;
-      width: number;
-      height: number;
-      color: string;
-      opacity: number;
-      author: string;
-      createdAt: string;
-      comment: string;
-      resolved: boolean;
-      flatten: boolean;
-    }
-  | {
-      id: string;
-      page: number;
-      kind: "note";
-      noteType: "sticky" | "callout";
-      x: number;
-      y: number;
-      width: number;
-      height: number;
-      color: string;
-      text: string;
-      author: string;
-      createdAt: string;
-      comment: string;
-      resolved: boolean;
-      flatten: boolean;
-    }
-  | {
-      id: string;
-      page: number;
-      kind: "stamp";
-      x: number;
-      y: number;
-      width: number;
-      height: number;
-      label: string;
-      color: string;
-      author: string;
-      createdAt: string;
-      comment: string;
-      resolved: boolean;
-      flatten: boolean;
-    }
-  | {
-      id: string;
-      page: number;
-      kind: "attachment";
-      x: number;
-      y: number;
-      width: number;
-      height: number;
-      name: string;
-      mimeType: string;
-      dataUrl: string;
-      author: string;
-      createdAt: string;
-      comment: string;
-      resolved: boolean;
-      flatten: boolean;
-    }
-  | {
-      id: string;
-      page: number;
-      kind: "measurement";
-      measurement: "distance" | "perimeter" | "area";
-      points: { x: number; y: number }[];
-      color: string;
-      unit: "pt" | "in" | "cm" | "mm";
-      scale: number;
-      label: string;
-      author: string;
-      createdAt: string;
-      comment: string;
-      resolved: boolean;
-      flatten: boolean;
-    }
-  | {
-      id: string;
-      page: number;
-      kind: "formField";
-      fieldType: "text" | "choice" | "checkbox" | "radio" | "signature";
-      x: number;
-      y: number;
-      width: number;
-      height: number;
-      name: string;
-      label: string;
-      value: string;
-      options: string[];
-      required: boolean;
-      readOnly: boolean;
-      multiline: boolean;
-      maxLength: number;
-      validation: "none" | "email" | "number" | "regex";
-      validationPattern: string;
-      calculation: string;
-      tabOrder: number;
-      flatten: boolean;
-    }
-  | {
-      id: string;
-      page: number;
-      kind: "visualSignature";
-      mode: "typed" | "image" | "digital";
-      x: number;
-      y: number;
-      width: number;
-      height: number;
-      text: string;
-      dataUrl?: string;
-      color: string;
-      signer: string;
-      signedAt: string;
-    };
+/** Overlays are exported exactly as the editor stores them. */
+export type ExportOverlay = Overlay;
 
 export type ExportRequest = {
   overlays: ExportOverlay[];
@@ -291,34 +87,53 @@ export type ExportResult = {
   annotationCount: number;
   redactionCount: number;
   redactionPages: number[];
+  /** Characters no bundled font can draw; they are exported as blanks. */
+  missingGlyphs: string[];
 };
 
+export type DocumentInfo = {
+  pageCount: number;
+  pages: PageInfo[];
+  metadata: PdfMetadata;
+  formFields: FormField[];
+  encrypted: boolean;
+  signatures: SignatureStatus[];
+};
+
+export type AppendOperation =
+  | { type: "blank"; width: number; height: number }
+  | { type: "images"; images: ArrayBuffer[] }
+  | { type: "copy"; source: number }
+  | { type: "pdf"; bytes: ArrayBuffer; password?: string };
+
+export type AppendResult = DocumentInfo & {
+  /** The new source document; the appended pages follow the old ones. */
+  bytes: Uint8Array;
+  firstIndex: number;
+  count: number;
+};
+
+/** Error messages start with one of these codes so the UI can react. */
+export const PASSWORD_REQUIRED = "PASSWORD_REQUIRED";
+export const PASSWORD_INCORRECT = "PASSWORD_INCORRECT";
+
 export interface PdfWorkerApi {
-  loadDocument(
-    bytes: ArrayBuffer,
-  ): Promise<{
-    pageCount: number;
-    pages: PageInfo[];
-    metadata: PdfMetadata;
-    formFields: FormField[];
-    encrypted: boolean;
-    signatures: SignatureStatus[];
-  }>;
+  loadDocument(bytes: ArrayBuffer, password?: string): Promise<DocumentInfo>;
   renderPage(index: number, scale: number): Promise<Uint8Array>;
   extractText(index: number): Promise<string>;
   extractTextLines(index: number): Promise<PositionedTextLine[]>;
   extractPageImages(index: number): Promise<PageImage[]>;
   exportDocument(request: ExportRequest): Promise<ExportResult>;
-  mergeDocument(
-    bytes: ArrayBuffer,
-    request: ExportRequest,
-  ): Promise<{ bytes: Uint8Array; pageCount: number }>;
-  composeDocument(
-    request: ExportRequest,
-    operation:
-      | { type: "blank"; at: number; width: number; height: number }
-      | { type: "duplicate"; at: number; source: number }
-      | { type: "insert"; at: number; bytes: ArrayBuffer },
-  ): Promise<{ bytes: Uint8Array; pageCount: number }>;
+  /**
+   * Adds pages to the end of the source document without touching edits, so
+   * page insertion stays undoable through the page order.
+   */
+  appendPages(operation: AppendOperation): Promise<AppendResult>;
+  /** Builds a new PDF with one page per image (PNG or JPEG), fitted to A4. */
+  createFromImages(images: ArrayBuffer[]): Promise<Uint8Array>;
+  /** Renders a page of another PDF (such as an export) without opening it. */
+  renderBytes(bytes: Uint8Array, index: number, scale: number): Promise<Uint8Array>;
+  /** Plain text of every page of another PDF, one string per page. */
+  textOfBytes(bytes: Uint8Array): Promise<string[]>;
   destroy(): Promise<void>;
 }

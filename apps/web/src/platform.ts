@@ -13,25 +13,29 @@ const toBase64 = (bytes: Uint8Array) => {
   return btoa(binary);
 };
 
-export async function savePdf(bytes: Uint8Array, filename: string) {
+/** Saves a file: a browser download on the web, the share sheet on Android. */
+export async function saveFile(data: Uint8Array | Blob, filename: string, mimeType: string) {
+  const bytes = data instanceof Blob ? new Uint8Array(await data.arrayBuffer()) : data;
   if (!isNativePlatform) {
     const copy = new Uint8Array(bytes.byteLength);
     copy.set(bytes);
-    const url = URL.createObjectURL(new Blob([copy.buffer], { type: "application/pdf" }));
+    const url = URL.createObjectURL(new Blob([copy.buffer], { type: mimeType }));
     const anchor = document.createElement("a");
     anchor.href = url;
     anchor.download = filename;
     anchor.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-    return "Downloaded PDF";
+    return "Downloaded";
   }
 
   const safeName = filename.replace(/[^a-z0-9._-]+/gi, "-");
   await Filesystem.writeFile({ path: `exports/${safeName}`, data: toBase64(bytes), directory: Directory.Cache, recursive: true });
   const { uri } = await Filesystem.getUri({ path: `exports/${safeName}`, directory: Directory.Cache });
-  await Share.share({ title: safeName, text: "Edited locally with Paperless PDF Editor", files: [uri], dialogTitle: "Save or share PDF" });
-  return "PDF ready to save or share";
+  await Share.share({ title: safeName, text: "Saved locally with Paperless PDF Editor", files: [uri], dialogTitle: "Save or share" });
+  return "Ready to save or share";
 }
+
+export const savePdf = (bytes: Uint8Array, filename: string) => saveFile(bytes, filename, "application/pdf");
 
 export async function configureNativeUi() {
   if (!isNativePlatform) return;
