@@ -6,17 +6,19 @@
   "license": "AGPL-3.0-only",
   "exports": {
     ".": "./src/client.ts",
-    "./worker": "./src/mupdf.worker.ts"
+    "./worker": "./src/mupdf.worker.ts",
+    "./fonts": "./src/fontData.ts"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "lint": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run"
   },
   "dependencies": {
     "comlink": "^4.4.2",
-    "mupdf": "1.28.1"
+    "mupdf": "1.28.1",
+    "@paperless/editor-core": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.9.2",
