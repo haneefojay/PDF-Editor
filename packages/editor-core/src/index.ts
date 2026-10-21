@@ -101,6 +101,19 @@ export const Overlay = z.discriminatedUnion("kind", [
     width: z.number().nonnegative(),
     height: z.number().nonnegative(),
     color: z.string(),
+    // "redact" securely removes everything under the box. The erase modes are
+    // used internally when replacing original text or images and only remove
+    // that kind of content, so table rules and backgrounds survive an edit.
+    mode: z.enum(["redact", "eraseText", "eraseImage"]).optional(),
+  }),
+  z.object({
+    id: z.string(),
+    page: z.number().int().nonnegative(),
+    kind: z.literal("line"),
+    points: z.array(Point).length(2),
+    color: z.string(),
+    width: z.number().positive(),
+    arrow: z.enum(["none", "end", "both"]).default("none"),
   }),
   z.object({
     id: z.string(),
@@ -231,6 +244,7 @@ export type Tool =
   | "ink"
   | "signature"
   | "shape"
+  | "line"
   | "redact"
   | "crop"
   | "markup"
@@ -239,6 +253,18 @@ export type Tool =
   | "attachment"
   | "measure"
   | "form";
+
+/** Headers, footers, watermark and Bates numbers, regenerated for the current page order. */
+export const PageLayout = z.object({
+  header: z.string().default(""),
+  footer: z.string().default(""),
+  watermark: z.string().default(""),
+  batesPrefix: z.string().default(""),
+  batesStart: z.number().int().nonnegative().default(1),
+  batesDigits: z.number().int().min(1).max(12).default(4),
+  background: z.string().nullable().default(null),
+});
+export type PageLayout = z.infer<typeof PageLayout>;
 
 export const EditorDocumentSchema = z.object({
   schemaVersion: z.literal(1),
@@ -253,6 +279,7 @@ export const EditorDocumentSchema = z.object({
     keywords: "",
   }),
   formValues: z.record(z.string(), z.string()).default({}),
+  layout: PageLayout.nullable().default(null),
 });
 export type EditorDocument = z.infer<typeof EditorDocumentSchema>;
 
@@ -272,7 +299,18 @@ export type Command =
       after: NormalizedRect | null;
     }
   | { type: "setMetadata"; before: Metadata; after: Metadata }
-  | { type: "setFormValue"; name: string; before: string; after: string };
+  | { type: "setFormValue"; name: string; before: string; after: string }
+  | { type: "setLayout"; before: PageLayout | null; after: PageLayout | null }
+  | { type: "batch"; commands: Command[] };
+
+export type RedactMode = "redact" | "eraseText" | "eraseImage";
+/** Projects saved before redact modes existed used white boxes for erasing. */
+export const redactMode = (overlay: {
+  color: string;
+  mode?: RedactMode;
+}): RedactMode =>
+  overlay.mode ??
+  (overlay.color.toLowerCase() === "#ffffff" ? "eraseText" : "redact");
 
 export const emptyDocument = (pageCount = 0): EditorDocument => ({
   schemaVersion: 1,
@@ -282,12 +320,15 @@ export const emptyDocument = (pageCount = 0): EditorDocument => ({
   crops: {},
   metadata: { title: "", author: "", subject: "", keywords: "" },
   formValues: {},
+  layout: null,
 });
 
 export function applyCommand(
   state: EditorDocument,
   command: Command,
 ): EditorDocument {
+  if (command.type === "batch")
+    return command.commands.reduce(applyCommand, state);
   return produce(state, (draft) => {
     if (command.type === "add") draft.overlays.push(command.overlay);
     if (command.type === "addMany") draft.overlays.push(...command.overlays);
@@ -316,10 +357,16 @@ export function applyCommand(
     if (command.type === "setMetadata") draft.metadata = command.after;
     if (command.type === "setFormValue")
       draft.formValues[command.name] = command.after;
+    if (command.type === "setLayout") draft.layout = command.after;
   });
 }
 
 export function inverseCommand(command: Command): Command {
+  if (command.type === "batch")
+    return {
+      type: "batch",
+      commands: [...command.commands].reverse().map(inverseCommand),
+    };
   if (command.type === "add")
     return { type: "remove", overlay: command.overlay };
   if (command.type === "addMany")
@@ -341,6 +388,8 @@ export function inverseCommand(command: Command): Command {
   if (command.type === "setMetadata")
     return { ...command, before: command.after, after: command.before };
   if (command.type === "setFormValue")
+    return { ...command, before: command.after, after: command.before };
+  if (command.type === "setLayout")
     return { ...command, before: command.after, after: command.before };
   throw new Error("Unsupported command");
 }

@@ -1,6 +1,14 @@
 import * as Comlink from "comlink";
 import type { PdfWorkerApi } from "./protocol";
+export {
+  PASSWORD_INCORRECT,
+  PASSWORD_REQUIRED,
+} from "./protocol";
 export type {
+  AppendOperation,
+  AppendResult,
+  DocumentInfo,
+  ExportResult,
   FormField,
   PageImage,
   PageInfo,

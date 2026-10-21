@@ -179,6 +179,9 @@ importers:
 
   packages/pdf-engine:
     dependencies:
+      '@paperless/editor-core':
+        specifier: workspace:*
+        version: link:../editor-core
       comlink:
         specifier: ^4.4.2
         version: 4.4.2
