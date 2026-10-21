@@ -190,6 +190,8 @@ export function App() {
   const pinch = useRef<{ distance: number; zoom: number; contentX: number; contentY: number; offsetX: number; offsetY: number } | null>(null);
   const loadSequence = useRef(0);
   const clipboard = useRef<Overlay | null>(null);
+  // Thumbnails render one at a time so they never starve the main page.
+  const thumbQueue = useRef<{ pending: Set<number>; running: boolean; generation: number }>({ pending: new Set(), running: false, generation: 0 });
   const fontsReady = usePreviewFonts();
 
   const [open, setOpen] = useState<OpenDoc | null>(null);
@@ -326,6 +328,8 @@ export function App() {
   const api = () => engine.current!.api;
 
   const resetView = () => {
+    thumbQueue.current.generation += 1;
+    thumbQueue.current.pending.clear();
     setTextLines([]);
     setSelectedId(null);
     setEditingId(null);
@@ -501,7 +505,6 @@ export function App() {
     if (!openBytesRef) return;
     let active = true;
     setTextLines([]);
-    setOriginalEdit(null);
     void withTimeout(api().extractTextLines(sourcePage), 20_000, "Reading page text took too long.")
       .then((lines) => active && setTextLines(lines))
       .catch(() => undefined);
@@ -510,8 +513,6 @@ export function App() {
     };
   }, [openBytesRef, sourcePage]);
 
-  // Thumbnails render one at a time so they never starve the main page.
-  const thumbQueue = useRef<{ pending: Set<number>; running: boolean; bytes?: ArrayBuffer }>({ pending: new Set(), running: false });
   const requestThumb = useCallback(
     (source: number) => {
       const queue = thumbQueue.current;
@@ -524,8 +525,11 @@ export function App() {
           queue.pending.delete(next);
           const info = open?.pages[next];
           if (!info) continue;
+          const generation = queue.generation;
           try {
             const png = await api().renderPage(next, Math.min(0.5, 220 / Math.max(info.width, info.height)));
+            // A different document was opened while this page rendered.
+            if (generation !== queue.generation) continue;
             setThumbs((current) => {
               if (current.has(next)) return current;
               return new Map(current).set(next, pngUrl(png));
@@ -1116,13 +1120,14 @@ export function App() {
     const y = Math.max(0, line.y - pad);
     return { id: crypto.randomUUID(), page: source, kind: "redact", x: Math.max(0, line.x - pad), y, width: Math.min(1, line.width + pad * 2), height: Math.min(1 - y, line.height + pad * 2), color: "#ffffff", mode: "eraseText" };
   };
-  const buildReplacement = (edit: OriginalEdit, source: number) => {
+  const buildReplacement = (edit: OriginalEdit) => {
+    const source = edit.source;
     const info = open?.pages[source];
     if (!info) return { overlays: [] as Overlay[], selectId: null as string | null };
     const line = edit.line;
     // Runs on the same baseline that touch the edited run form one mixed-style
     // line; separate cells or columns further away are left alone.
-    const sameBaseline = textLines.filter((candidate) => Math.abs(candidate.baseline - line.baseline) < 0.002).sort((a, b) => a.x - b.x);
+    const sameBaseline = edit.lines.filter((candidate) => Math.abs(candidate.baseline - line.baseline) < 0.002).sort((a, b) => a.x - b.x);
     const position = sameBaseline.findIndex((run) => run.id === line.id);
     const near = (left: PositionedTextLine, right: PositionedTextLine) => (right.x - (left.x + left.width)) * info.width < Math.max(left.size, right.size) * 1.2;
     let first = position;
@@ -1165,13 +1170,21 @@ export function App() {
   const commitOriginalEdit = (edit: OriginalEdit | null, select: boolean) => {
     if (!edit) return;
     setOriginalEdit(null);
-    const extracted = textLines.find((line) => line.id === edit.line.id);
+    const extracted = edit.lines.find((line) => line.id === edit.line.id);
     if (edit.draft === edit.line.text && JSON.stringify(extracted) === JSON.stringify(edit.line)) return;
-    const { overlays, selectId } = buildReplacement(edit, sourcePage);
+    const { overlays, selectId } = buildReplacement(edit);
     if (!overlays.length) return;
     execute({ type: "addMany", overlays });
     setSelectedId(select ? selectId : null);
   };
+
+  // Leaving a page keeps an unfinished text edit instead of dropping it.
+  const pendingEdit = useRef<{ edit: OriginalEdit | null; commit: typeof commitOriginalEdit }>({ edit: null, commit: commitOriginalEdit });
+  pendingEdit.current = { edit: originalEdit, commit: commitOriginalEdit };
+  useEffect(() => {
+    const { edit, commit } = pendingEdit.current;
+    if (edit && edit.source !== sourcePage) commit(edit, false);
+  }, [sourcePage]);
 
   // --- find & replace ----------------------------------------------------
 
@@ -2216,7 +2229,7 @@ export function App() {
                   if (originalEdit) commitOriginalEdit(originalEdit, false);
                   setSelectedId(null);
                   setEditingId(null);
-                  setOriginalEdit({ line, draft: line.text });
+                  setOriginalEdit({ line, draft: line.text, source: sourcePage, lines: textLines });
                 }}
                 onOriginalChange={(draft) => setOriginalEdit((currentEdit) => (currentEdit ? { ...currentEdit, draft } : null))}
                 onOriginalCommit={() => commitOriginalEdit(originalEdit, true)}

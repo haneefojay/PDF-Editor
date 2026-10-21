@@ -44,7 +44,8 @@ export type CanvasSettings = {
   hasCertificate: boolean;
 };
 
-export type OriginalEdit = { line: PositionedTextLine; draft: string };
+/** An in-progress edit of original text, with the page's text runs at the time. */
+export type OriginalEdit = { line: PositionedTextLine; draft: string; source: number; lines: PositionedTextLine[] };
 
 const rectTools: Tool[] = ["shape", "redact", "crop", "markup", "measure", "form"];
 const pointTools: Tool[] = ["ink", "line"];
