@@ -201,8 +201,37 @@ svg {
 .openButton:hover {
   transform: translateY(-1px);
 }
-.openButton input {
+.openButton input,
+.secondaryButton input {
   display: none;
+}
+.secondaryButton {
+  display: flex;
+  width: max-content;
+  align-items: center;
+  gap: 8px;
+  margin: 12px auto 0;
+  padding: 10px 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: 11px;
+  background: var(--raised);
+  cursor: pointer;
+  font-size: 14px;
+}
+.secondaryButton:hover {
+  background: var(--hover);
+}
+.secondaryButton svg {
+  width: 18px;
+  height: 18px;
+  color: var(--accent);
+}
+.printFrame {
+  position: fixed;
+  width: 0;
+  height: 0;
+  border: 0;
+  visibility: hidden;
 }
 .dropcopy {
   font-size: 13px;

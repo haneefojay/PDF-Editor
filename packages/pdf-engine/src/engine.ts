@@ -1309,6 +1309,34 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
     }
   };
 
+  /** Adds one page per image, sized to A4 in the image's orientation. */
+  const addImagePages = (target: Mupdf.PDFDocument, images: ArrayBuffer[]) => {
+    for (const data of images) {
+      let image: Mupdf.Image;
+      try {
+        image = new mupdf.Image(new Uint8Array(data));
+      } catch {
+        throw new Error("One of the images could not be read. Use PNG or JPEG files.");
+      }
+      const landscape = image.getWidth() > image.getHeight();
+      const [pageWidth, pageHeight] = landscape ? [842, 595] : [595, 842];
+      const scale = Math.min(pageWidth / image.getWidth(), pageHeight / image.getHeight());
+      const width = image.getWidth() * scale;
+      const height = image.getHeight() * scale;
+      const resources = target.newDictionary();
+      const xobjects = target.newDictionary();
+      xobjects.put("Im0", target.addImage(image));
+      resources.put("XObject", xobjects);
+      image.destroy();
+      const x = (pageWidth - width) / 2;
+      const y = (pageHeight - height) / 2;
+      target.insertPage(
+        -1,
+        target.addPage([0, 0, pageWidth, pageHeight], 0, resources, `q ${num(width)} 0 0 ${num(height)} ${num(x)} ${num(y)} cm /Im0 Do Q`),
+      );
+    }
+  };
+
   return {
     async loadDocument(bytes, secret) {
       const copy = copyBytes(new Uint8Array(bytes));
@@ -1458,7 +1486,8 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
       const target = open(sourceBytes!, password);
       const firstIndex = target.countPages();
       try {
-        if (operation.type === "blank") {
+        if (operation.type === "images") addImagePages(target, operation.images);
+        else if (operation.type === "blank") {
           target.insertPage(
             -1,
             target.addPage([0, 0, operation.width, operation.height], 0, target.newDictionary(), ""),
@@ -1487,6 +1516,47 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
         reopened.destroy();
         const info = loadInto(bytes, needsSecret ? password : undefined);
         return { ...info, bytes: copyBytes(bytes), firstIndex, count };
+      } finally {
+        target.destroy();
+      }
+    },
+
+    async createFromImages(images) {
+      if (!images.length) throw new Error("Choose at least one image.");
+      const target = new mupdf.PDFDocument();
+      try {
+        addImagePages(target, images);
+        return copyBytes(target.saveToBuffer("garbage=3,compress=yes").asUint8Array());
+      } finally {
+        target.destroy();
+      }
+    },
+
+    async renderBytes(bytes, index, scale) {
+      const target = open(bytes);
+      try {
+        const page = target.loadPage(index);
+        const pixmap = page.toPixmap([scale, 0, 0, scale, 0, 0], mupdf.ColorSpace.DeviceRGB, false, true);
+        const png = copyBytes(pixmap.asPNG());
+        pixmap.destroy();
+        page.destroy();
+        return png;
+      } finally {
+        target.destroy();
+      }
+    },
+
+    async textOfBytes(bytes) {
+      const target = open(bytes);
+      try {
+        return Array.from({ length: target.countPages() }, (_, index) => {
+          const page = target.loadPage(index);
+          const structured = page.toStructuredText("");
+          const text = structured.asText();
+          structured.destroy();
+          page.destroy();
+          return text;
+        });
       } finally {
         target.destroy();
       }
