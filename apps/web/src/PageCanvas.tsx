@@ -7,7 +7,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { normalizeRect, type Overlay, type Tool } from "@paperless/editor-core";
-import type { PageInfo, PageLink, PositionedTextLine } from "@paperless/pdf-engine";
+import type { PageImage, PageInfo, PageLink, PositionedTextLine } from "@paperless/pdf-engine";
 import { fitTextBox, layoutStyled, previewTextStyle } from "./textMetrics";
 import { boundsOf, snapToText, type Rect } from "./geometry";
 import { LAYOUT_ID } from "./layout";
@@ -108,6 +108,9 @@ export function PageCanvas(props: {
   textEditable: boolean;
   links: PageLink[];
   onLink: (link: PageLink) => void;
+  /** Images drawn by the page itself, offered for lifting into editable objects. */
+  pageImages: Omit<PageImage, "dataUrl">[];
+  onLiftImage: (image: Omit<PageImage, "dataUrl">) => void;
   originalEdit: OriginalEdit | null;
   crop?: Rect;
   tool: Tool;
@@ -131,7 +134,7 @@ export function PageCanvas(props: {
   const wrapRef = useRef<HTMLDivElement>(null);
   const start = useRef<Point | null>(null);
   const points = useRef<Point[]>([]);
-  const drag = useRef<{ before: Overlay; start: Point; bounds: Rect; mode: "move" | "resize" } | null>(null);
+  const drag = useRef<{ before: Overlay; start: Point; bounds: Rect; mode: "move" | "resize" | "rotate" } | null>(null);
   const [livePoints, setLivePoints] = useState<Point[]>([]);
   const [liveRect, setLiveRect] = useState<Rect | null>(null);
   const [preview, setPreview] = useState<Overlay | null>(null);
@@ -297,6 +300,17 @@ export function PageCanvas(props: {
       const dx = current.x - origin.x;
       const dy = current.y - origin.y;
       if (before.kind === "background") return;
+      if (mode === "rotate" && before.kind === "image") {
+        const cx = bounds.x + bounds.width / 2;
+        const cy = bounds.y + bounds.height / 2;
+        // The handle sits above the image, so straight up is 0°.
+        let angle = (Math.atan2((current.y - cy) * info.height, (current.x - cx) * info.width) * 180) / Math.PI + 90;
+        angle = ((angle + 540) % 360) - 180;
+        const snapped = Math.round(angle / 15) * 15;
+        if (Math.abs(angle - snapped) < 4) angle = snapped;
+        setPreview({ ...before, rotation: Math.round(angle * 10) / 10 });
+        return;
+      }
       if ("points" in before) {
         if (mode === "move") {
           const shiftX = Math.min(1 - bounds.x - bounds.width, Math.max(-bounds.x, dx));
@@ -470,7 +484,7 @@ export function PageCanvas(props: {
   };
 
   const shown = props.overlays.map((overlay) => (preview?.id === overlay.id ? preview : overlay));
-  const objectDown = (event: ReactPointerEvent, overlay: Overlay, mode: "move" | "resize") => {
+  const objectDown = (event: ReactPointerEvent, overlay: Overlay, mode: "move" | "resize" | "rotate") => {
     if (tool !== "select" || event.button > 0) return;
     event.stopPropagation();
     if (props.editingId === overlay.id) return;
@@ -739,6 +753,31 @@ export function PageCanvas(props: {
           ) : null,
         )}
         {tool === "select" &&
+          props.pageImages
+            .filter(
+              (image) =>
+                !shown.some(
+                  (overlay) =>
+                    overlay.kind === "redact" &&
+                    overlay.mode === "eraseImage" &&
+                    Math.abs(overlay.x - image.x) < 0.002 &&
+                    Math.abs(overlay.y - image.y) < 0.002,
+                ),
+            )
+            .map((image) => (
+              <button
+                key={image.id}
+                className="embeddedImageHit"
+                aria-label={`Edit image (${image.pixelWidth}×${image.pixelHeight})`}
+                title="Click to move, resize, rotate or delete this image"
+                style={percent(image)}
+                onPointerDown={(event) => {
+                  event.stopPropagation();
+                  props.onLiftImage(image);
+                }}
+              />
+            ))}
+        {tool === "select" &&
           props.links.map((link, index) => (
             <a
               key={`link-${index}`}
@@ -848,12 +887,15 @@ export function PageCanvas(props: {
                 <div
                   key={`hit-${overlay.id}`}
                   className={`objectBox ${selected ? "selected" : ""} ${overlay.kind === "text" ? "textBox" : ""}`}
-                  style={percent(boundsOf(overlay))}
+                  style={{ ...percent(boundsOf(overlay)), transform: overlay.kind === "image" && overlay.rotation ? `rotate(${overlay.rotation}deg)` : undefined }}
                   title={overlay.kind === "text" ? "Double-click to edit" : undefined}
                   onPointerDown={(event) => objectDown(event, overlay, "move")}
                   onDoubleClick={() => overlay.kind === "text" && props.onEditText(overlay.id)}
                 >
                   {selected && <button className="resizeHandle" aria-label="Resize selected object" onPointerDown={(event) => objectDown(event, overlay, "resize")} />}
+                  {selected && overlay.kind === "image" && (
+                    <button className="rotateHandle" aria-label="Rotate selected image" onPointerDown={(event) => objectDown(event, overlay, "rotate")} />
+                  )}
                 </div>
               );
             })}
