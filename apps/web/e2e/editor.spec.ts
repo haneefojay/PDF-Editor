@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { inspectPdf, pngImage, samplePdf } from "./fixtures";
+import { inspectPdf, longPdf, pngImage, samplePdf } from "./fixtures";
 import { clickOnPage, dragOnPage, exportPdf, fitPage, openSample, tab, tool } from "./helpers";
 
 test("edits original text without disturbing the table around it", async ({ page }) => {
@@ -114,7 +114,7 @@ test("opens password-protected PDFs", async ({ page }) => {
   await expect(dialog.locator(".fieldError")).toBeVisible();
   await dialog.getByLabel("Password", { exact: true }).fill("secret");
   await page.keyboard.press("Enter");
-  await expect(page.locator(".page img")).toBeVisible({ timeout: 60_000 });
+  await expect(page.locator(".page img").first()).toBeVisible({ timeout: 60_000 });
   const pdf = inspectPdf(await exportPdf(page));
   expect(pdf.needsPassword).toBe(false);
   expect(pdf.pages[0]!.text).toContain("Quarterly Report");
@@ -164,4 +164,37 @@ test("keeps an unfinished text edit when changing page", async ({ page }) => {
   await expect(page.locator(".pageInput")).toHaveValue("2");
   const pdf = inspectPdf(await exportPdf(page));
   expect(pdf.pages[0]!.text).toContain("Southwest");
+});
+
+test("continuous scrolling tracks the page and follows outline and links", async ({ page }) => {
+  await openSample(page, longPdf(), "long.pdf");
+  await expect(page.locator(".pageSlot")).toHaveCount(12);
+  // Only pages near the viewport are rendered.
+  expect(await page.locator(".page > img").count()).toBeLessThan(6);
+
+  await page.locator(".stage").evaluate((stage) => stage.scrollBy(0, stage.scrollHeight / 2));
+  await expect(page.locator(".pageInput")).not.toHaveValue("1");
+
+  await page.getByRole("tab", { name: "Outline" }).click();
+  await page.locator(".outlineEntry", { hasText: "Methods" }).click();
+  await expect(page.locator(".pageInput")).toHaveValue("4");
+
+  await page.locator(".outlineEntry", { hasText: "Introduction" }).click();
+  await expect(page.locator(".pageInput")).toHaveValue("1");
+  // Links are followed outside the Edit tab, where clicking text edits it.
+  await tab(page, "Comment");
+  await expect(page.getByRole("link", { name: "Link to https://example.com/" })).toBeAttached();
+  await page.getByRole("link", { name: "Link to page 9" }).click();
+  await expect(page.locator(".pageInput")).toHaveValue("9");
+});
+
+test("edits a page further down without losing the place", async ({ page }) => {
+  await openSample(page, longPdf(), "long.pdf");
+  await page.locator(".rail .thumb").nth(5).click();
+  await expect(page.locator(".pageInput")).toHaveValue("6");
+  await tool(page, "Shapes");
+  await dragOnPage(page, [0.3, 0.3], [0.6, 0.5], 5);
+  const pdf = inspectPdf(await exportPdf(page));
+  expect(pdf.pages[5]!.annotations).toEqual(["Square"]);
+  expect(pdf.pages[0]!.annotations).toEqual([]);
 });

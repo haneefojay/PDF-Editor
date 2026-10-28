@@ -59,6 +59,26 @@ export type PositionedTextLine = {
   fitMode: "auto" | "shrink" | "overflow";
 };
 
+export type OutlineEntry = {
+  title: string;
+  /** Target page index, or null when the entry has no destination in this file. */
+  page: number | null;
+  depth: number;
+  uri?: string;
+};
+/** A clickable area on a page, in normalized coordinates. */
+export type PageLink = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** Internal target page and normalized vertical position on it. */
+  page?: number;
+  top?: number;
+  /** External target (web or mail address). */
+  uri?: string;
+};
+
 /** Overlays are exported exactly as the editor stores them. */
 export type ExportOverlay = Overlay;
 
@@ -123,6 +143,9 @@ export interface PdfWorkerApi {
   extractText(index: number): Promise<string>;
   extractTextLines(index: number): Promise<PositionedTextLine[]>;
   extractPageImages(index: number): Promise<PageImage[]>;
+  /** The document outline (bookmarks), flattened in reading order. */
+  getOutline(): Promise<OutlineEntry[]>;
+  getLinks(index: number): Promise<PageLink[]>;
   exportDocument(request: ExportRequest): Promise<ExportResult>;
   /**
    * Adds pages to the end of the source document without touching edits, so

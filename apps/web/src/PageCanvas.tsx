@@ -7,7 +7,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { normalizeRect, type Overlay, type Tool } from "@paperless/editor-core";
-import type { PageInfo, PositionedTextLine } from "@paperless/pdf-engine";
+import type { PageInfo, PageLink, PositionedTextLine } from "@paperless/pdf-engine";
 import { fitTextBox, layoutStyled, previewTextStyle } from "./textMetrics";
 import { boundsOf, snapToText, type Rect } from "./geometry";
 import { LAYOUT_ID } from "./layout";
@@ -96,6 +96,10 @@ export function PageCanvas(props: {
   rotation: number;
   overlays: Overlay[];
   textLines: PositionedTextLine[];
+  /** Whether tapping original text starts editing it (off while just reading on phones). */
+  textEditable: boolean;
+  links: PageLink[];
+  onLink: (link: PageLink) => void;
   originalEdit: OriginalEdit | null;
   crop?: Rect;
   tool: Tool;
@@ -485,6 +489,10 @@ export function PageCanvas(props: {
   const originalBox = original ? fitTextBox({ ...original.line, fitMode: "auto", lineHeight: 1.2 }, original.draft, info) : null;
   const originalLayout = original && originalBox ? layoutStyled({ ...original.line, fitMode: "auto", lineHeight: 1.2 }, original.draft, info, originalBox.width) : null;
   const draftSize = draft?.kind === "text" ? settings.textSize : 11;
+  // Focus new editors without letting the browser scroll the page sideways.
+  const focusOnce = (node: HTMLTextAreaElement | null) => {
+    if (node && document.activeElement !== node) node.focus({ preventScroll: true });
+  };
   const editorKeys = (event: ReactKeyboardEvent, commit: () => void, cancel: () => void) => {
     event.stopPropagation();
     if (event.key === "Escape") {
@@ -508,7 +516,7 @@ export function PageCanvas(props: {
       onPointerCancel={up}
     >
       <div
-        className={`page tool-${tool}`}
+        className={`page tool-${tool} ${props.image ? "" : "rendering"}`}
         style={{ width: pageWidth, height: pageHeight, transform: `translate(-50%, -50%) rotate(${rotation}deg)` }}
       >
         {props.image && <img src={props.image} alt={`Rendered PDF page ${page + 1}`} draggable={false} />}
@@ -715,6 +723,23 @@ export function PageCanvas(props: {
           ) : null,
         )}
         {tool === "select" &&
+          props.links.map((link, index) => (
+            <a
+              key={`link-${index}`}
+              className="linkHit"
+              href={link.uri ?? `#page-${(link.page ?? 0) + 1}`}
+              aria-label={link.uri ? `Link to ${link.uri}` : `Link to page ${(link.page ?? 0) + 1}`}
+              title={link.uri ?? "Go to linked page"}
+              style={percent(link)}
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.preventDefault();
+                props.onLink(link);
+              }}
+            />
+          ))}
+        {tool === "select" &&
+          props.textEditable &&
           props.textLines
             .filter((line) => !lineWasReplaced(line) && line.id !== original?.line.id)
             .map((line) => (
@@ -734,7 +759,7 @@ export function PageCanvas(props: {
           <>
             <span className="eraseOverlay" style={percent(original.line)} />
             <textarea
-              autoFocus
+              ref={focusOnce}
               className="inlineEditor"
               aria-label="Edit original PDF text"
               value={original.draft}
@@ -755,7 +780,7 @@ export function PageCanvas(props: {
         )}
         {editing && (
           <textarea
-            autoFocus
+            ref={focusOnce}
             className="inlineEditor"
             aria-label="Edit text"
             value={editing.text}
@@ -777,7 +802,7 @@ export function PageCanvas(props: {
         )}
         {draft && (
           <textarea
-            autoFocus
+            ref={focusOnce}
             className={`inlineEditor draft draft-${draft.kind}`}
             aria-label={draft.kind === "text" ? "New text" : "New comment"}
             placeholder={draft.kind === "text" ? "Type here" : "Write a comment"}
@@ -785,6 +810,7 @@ export function PageCanvas(props: {
             style={{
               left: `${draft.x * 100}%`,
               top: `${draft.y * 100}%`,
+              maxWidth: `${(1 - draft.x) * 100}%`,
               ...(draft.kind === "text"
                 ? previewTextStyle({ x: 0, width: 0, size: draftSize, fontFamily: settings.textFont, bold: false, italic: false, lineHeight: 1.2, letterSpacing: 0, fitMode: "auto", color: settings.textColor }, draftSize, zoom)
                 : { fontSize: 13 }),

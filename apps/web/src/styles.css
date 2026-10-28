@@ -1847,3 +1847,287 @@ details.more > div label {
     bottom: calc(52px + env(safe-area-inset-bottom));
   }
 }
+
+/* ---------- Continuous page column ---------- */
+.pageColumn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+.pageSlot {
+  position: relative;
+  flex: 0 0 auto;
+}
+.pageHost {
+  display: contents;
+}
+.pagePlaceholder {
+  width: 100%;
+  height: 100%;
+  background: white;
+  box-shadow: 0 6px 24px #1d1b1530;
+}
+.page.rendering::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 28px;
+  height: 28px;
+  margin: -14px 0 0 -14px;
+  border: 3px solid #d5d2c9;
+  border-top-color: #8f8d85;
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+.linkHit {
+  position: absolute;
+  z-index: 1;
+  border-radius: 2px;
+  cursor: pointer;
+}
+.linkHit:hover,
+.linkHit:focus-visible {
+  background: #2f6fed1a;
+  box-shadow: inset 0 -2px 0 #2f6fed88;
+}
+
+/* Reading themes change only how pages look on screen. */
+.stage.theme-night {
+  background: #0d0d0c;
+}
+.stage.theme-night .page,
+.stage.theme-night .pagePlaceholder {
+  background: #1b1b19;
+}
+.stage.theme-night .page > img {
+  filter: invert(0.9) hue-rotate(180deg);
+}
+.stage.theme-sepia .page,
+.stage.theme-sepia .pagePlaceholder {
+  background: #f3ead6;
+}
+.stage.theme-sepia .page > img {
+  filter: sepia(0.45) brightness(0.97) contrast(0.95);
+}
+
+/* ---------- Outline ---------- */
+.railTitle .segmented {
+  flex: 1;
+  margin-right: 4px;
+}
+.railTitle .segmented button {
+  padding: 5px 4px;
+  font-size: 12px;
+}
+.outline {
+  display: grid;
+  gap: 1px;
+}
+.outlineEntry {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  text-align: left;
+  font-size: 13px;
+  line-height: 1.3;
+}
+.outlineEntry:hover:not(:disabled) {
+  background: var(--hover);
+}
+.outlineEntry:disabled {
+  opacity: 0.5;
+}
+.outlineEntry small {
+  color: var(--faint);
+  flex: 0 0 auto;
+}
+.outline .empty {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+}
+.outline .empty svg {
+  width: 22px;
+  height: 22px;
+  color: var(--faint);
+}
+
+/* ---------- Phone shell ---------- */
+.app.phone .top,
+.phoneDock {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 10;
+  transition: transform 0.22s ease;
+}
+.app.phone .top {
+  top: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-height: 52px;
+  padding: 2px 4px;
+  padding-top: max(2px, env(safe-area-inset-top));
+  box-shadow: 0 1px 0 var(--line);
+}
+.app.phone .file b {
+  font-size: 15px;
+}
+.app.phone .file small {
+  display: none;
+}
+.app.phone .topActions {
+  gap: 0;
+}
+.app.phone .export {
+  margin-left: 2px;
+}
+.phoneDock {
+  bottom: 0;
+  display: grid;
+  background: var(--surface);
+  box-shadow: 0 -1px 0 var(--line), 0 -6px 20px #0000000f;
+  padding-bottom: env(safe-area-inset-bottom);
+}
+.phoneDock .contextBar {
+  order: 0;
+  flex-wrap: nowrap;
+  justify-content: flex-start;
+  overflow-x: auto;
+  min-height: 52px;
+  border-bottom: 1px solid var(--line);
+  scrollbar-width: none;
+}
+.phoneDock .contextBar::-webkit-scrollbar {
+  display: none;
+}
+.phoneDock .ribbon {
+  justify-content: flex-start;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--line);
+}
+.phoneDock .ribbon button {
+  min-width: 68px;
+  min-height: 56px;
+  font-size: 11px;
+}
+.phoneDock .ribbon svg {
+  width: 21px;
+  height: 21px;
+}
+.bottomNav {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+}
+.bottomNav button {
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: 3px;
+  min-height: 58px;
+  padding: 6px 2px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+}
+.bottomNav button svg {
+  width: 22px;
+  height: 22px;
+}
+.bottomNav button.selected {
+  color: var(--accent-strong);
+}
+.bottomNav button.selected svg {
+  padding: 3px 12px;
+  width: 46px;
+  height: 28px;
+  border-radius: 14px;
+  background: var(--accent-soft);
+}
+.app.phone .work {
+  position: static;
+}
+.app.phone .status {
+  display: none;
+}
+.app.phone .stage {
+  touch-action: pan-x pan-y;
+}
+.app.phone .pageViewport {
+  padding: calc(64px + env(safe-area-inset-top)) 8px calc(150px + env(safe-area-inset-bottom));
+}
+.app.phone .rail,
+.app.phone .commentSidebar {
+  top: 0;
+  bottom: 0;
+  z-index: 20;
+  padding-top: max(10px, env(safe-area-inset-top));
+}
+.app.phone .rail {
+  width: min(78vw, 300px);
+}
+.app.phone .thumb .pageActions {
+  opacity: 1;
+}
+.pagePill {
+  position: absolute;
+  z-index: 9;
+  top: calc(62px + env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 6px 12px;
+  border: 0;
+  border-radius: 16px;
+  background: #171714cc;
+  color: white;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  transition:
+    top 0.22s ease,
+    opacity 0.3s ease;
+}
+.pagePill.faded {
+  opacity: 0;
+  pointer-events: none;
+}
+.app.phone.immersive .top {
+  transform: translateY(-110%);
+}
+.app.phone.immersive .phoneDock {
+  transform: translateY(110%);
+}
+.app.phone.immersive .pagePill {
+  top: calc(10px + env(safe-area-inset-top));
+}
+.app.phone .toasts {
+  top: calc(60px + env(safe-area-inset-top));
+  bottom: auto;
+}
+.app.phone .loading {
+  top: calc(64px + env(safe-area-inset-top));
+}
+
+.app.phone {
+  position: relative;
+}
+.app.phone .rail {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  align-content: start;
+  gap: 4px;
+}
+.app.phone .rail .railTitle,
+.app.phone .rail .outline {
+  grid-column: 1 / -1;
+}
+.app.phone .rail .thumb {
+  margin: 0;
+  padding: 5px;
+}

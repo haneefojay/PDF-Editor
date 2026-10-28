@@ -14,7 +14,9 @@ import type {
   ExportOverlay,
   ExportRequest,
   FormField,
+  OutlineEntry,
   PageImage,
+  PageLink,
   PdfMetadata,
   PdfWorkerApi,
   PositionedTextLine,
@@ -1485,6 +1487,66 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
       structured.destroy();
       page.destroy();
       return images;
+    },
+
+    async getOutline() {
+      const target = requireDoc();
+      const entries: OutlineEntry[] = [];
+      const walk = (items: ReturnType<Mupdf.Document["loadOutline"]> | undefined, depth: number) => {
+        for (const item of items ?? []) {
+          let page: number | null = item.page ?? null;
+          if (page === null && item.uri && !/^[a-z][a-z0-9+.-]*:/i.test(item.uri)) {
+            try {
+              page = target.resolveLink(item.uri);
+            } catch {
+              page = null;
+            }
+          }
+          entries.push({
+            title: (item.title ?? "").trim() || "Untitled",
+            page: page !== null && page >= 0 && page < target.countPages() ? page : null,
+            depth,
+            ...(item.uri && /^[a-z][a-z0-9+.-]*:/i.test(item.uri) ? { uri: item.uri } : {}),
+          });
+          walk(item.down, depth + 1);
+        }
+      };
+      walk(target.loadOutline(), 0);
+      return entries;
+    },
+
+    async getLinks(index) {
+      const target = requireDoc();
+      const page = target.loadPage(index);
+      const bounds = page.getBounds();
+      const width = bounds[2] - bounds[0];
+      const height = bounds[3] - bounds[1];
+      const links: PageLink[] = [];
+      for (const link of page.getLinks()) {
+        const [x0, y0, x1, y1] = link.getBounds();
+        const area = { x: (x0 - bounds[0]) / width, y: (y0 - bounds[1]) / height, width: (x1 - x0) / width, height: (y1 - y0) / height };
+        if (link.isExternal()) {
+          const uri = link.getURI();
+          // Only web and mail links are offered; other schemes are ignored.
+          if (/^(https?|mailto):/i.test(uri)) links.push({ ...area, uri });
+        } else {
+          try {
+            const destination = target.resolveLinkDestination(link);
+            if (destination.page >= 0 && destination.page < target.countPages()) {
+              const targetPage = target.loadPage(destination.page);
+              const targetBounds = targetPage.getBounds();
+              targetPage.destroy();
+              const top = Number.isFinite(destination.y) ? (destination.y - targetBounds[1]) / (targetBounds[3] - targetBounds[1]) : 0;
+              links.push({ ...area, page: destination.page, top: Math.min(1, Math.max(0, top)) });
+            }
+          } catch {
+            // Broken destinations are skipped rather than failing the page.
+          }
+        }
+        link.destroy();
+      }
+      page.destroy();
+      return links;
     },
 
     exportDocument,

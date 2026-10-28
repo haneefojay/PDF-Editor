@@ -52,3 +52,29 @@ export function inspectPdf(bytes: Buffer, password?: string) {
   doc.destroy();
   return { needsPassword, pages };
 }
+
+/** Twelve chapters with an outline, an internal link and a web link on page 1. */
+export function longPdf() {
+  const doc = new mupdf.PDFDocument();
+  const resources = doc.newDictionary();
+  const fonts = doc.newDictionary();
+  resources.put("Font", fonts);
+  fonts.put("F1", doc.addSimpleFont(new mupdf.Font("Helvetica")));
+  for (let index = 0; index < 12; index += 1) {
+    const lines = [`BT /F1 24 Tf 60 730 Td (Chapter ${index + 1}) Tj ET`];
+    for (let line = 0; line < 20; line += 1) lines.push(`BT /F1 11 Tf 60 ${690 - line * 26} Td (Line ${line + 1} of chapter ${index + 1}) Tj ET`);
+    if (index === 0) lines.push("BT /F1 12 Tf 60 120 Td (Go to chapter 9) Tj ET BT /F1 12 Tf 60 95 Td (Visit example.com) Tj ET");
+    doc.insertPage(-1, doc.addPage([0, 0, 612, 792], 0, resources, lines.join("\n")));
+  }
+  const destination = (page: number) => doc.formatLinkURI({ type: "Fit", chapter: 0, page, x: 0, y: 0, width: 0, height: 0, zoom: 0 });
+  const first = doc.loadPage(0);
+  first.createLink([60, 657, 200, 675], destination(8));
+  first.createLink([60, 682, 200, 700], "https://example.com/");
+  const outline = doc.outlineIterator();
+  for (const [title, page] of [["Introduction", 0], ["Methods", 3], ["Results", 6], ["Appendix", 11]] as const)
+    outline.insert({ title, uri: destination(page), open: true });
+  outline.destroy();
+  const bytes = Buffer.from(doc.saveToBuffer("garbage=3,compress=yes").asUint8Array());
+  doc.destroy();
+  return bytes;
+}
