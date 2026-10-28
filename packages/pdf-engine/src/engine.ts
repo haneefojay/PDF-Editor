@@ -17,6 +17,7 @@ import type {
   OutlineEntry,
   PageImage,
   PageLink,
+  PageMapping,
   PdfMetadata,
   PdfWorkerApi,
   PositionedTextLine,
@@ -1337,7 +1338,7 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
       const order = request.pageOrder;
       if (!order.length || new Set(order).size !== order.length || order.some((item) => !valid(item)))
         throw new Error("Export validation failed: page order is invalid.");
-      target.rearrangePages(order);
+      rearrangePages(target, order);
 
       let options =
         request.compression === "original"
@@ -1387,6 +1388,150 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
     } finally {
       target.destroy();
     }
+  };
+
+  /**
+   * MuPDF's rearrangePages also strips the catalog down to its page tree and
+   * outline, losing the form, language, viewer settings and named
+   * destinations. Put those back, keeping only form fields still on a page.
+   */
+  const rearrangePages = (target: Mupdf.PDFDocument, order: number[]) => {
+    const catalog = () => target.getTrailer().get("Root").resolve();
+    const saved: [string, Mupdf.PDFObject][] = [];
+    catalog().forEach((value, key) => {
+      if (typeof key === "string" && !["Type", "Pages", "Outlines", "StructTreeRoot", "MarkInfo"].includes(key)) saved.push([key, value]);
+    });
+    target.rearrangePages(order);
+    const root = catalog();
+    for (const [key, value] of saved) if (root.get(key).isNull()) root.put(key, value);
+    const form = root.get("AcroForm");
+    if (form.isNull() || form.get("Fields").isNull()) return;
+    const present = new Set<number>();
+    for (let index = 0; index < target.countPages(); index += 1) {
+      const annotations = target.loadPage(index).getObject().get("Annots");
+      for (let item = 0; item < annotations.length; item += 1) {
+        let field = annotations.get(item);
+        if (field.get("Subtype").asName() !== "Widget") continue;
+        while (!field.get("Parent").isNull()) field = field.get("Parent");
+        if (field.isIndirect()) present.add(field.asIndirect());
+      }
+    }
+    const before = form.get("Fields");
+    const fields = target.newArray();
+    for (let item = 0; item < before.length; item += 1) {
+      const field = before.get(item);
+      if (!field.isIndirect() || present.delete(field.asIndirect())) fields.push(field);
+    }
+    present.forEach((number) => fields.push(target.newIndirect(number)));
+    form.put("Fields", fields);
+  };
+
+  /**
+   * Copies a page to the end of `target` together with its annotations and
+   * form widgets, which MuPDF's graftPage leaves behind. `source` must be a
+   * throwaway copy: annotation /P links are removed from it before grafting.
+   */
+  const graftWithAnnotations = (target: Mupdf.PDFDocument, source: Mupdf.PDFDocument, index: number, map: Mupdf.PDFGraftMap) => {
+    map.graftPage(-1, source, index);
+    const sourcePage = source.loadPage(index);
+    const annotations = sourcePage.getObject().get("Annots");
+    sourcePage.destroy();
+    if (annotations.isNull() || !annotations.length) return;
+    // Without their /P links the annotations graft without dragging the
+    // source page (and through it the whole source page tree) along.
+    for (let item = 0; item < annotations.length; item += 1) {
+      const annotation = annotations.get(item);
+      annotation.delete("P");
+      if (!annotation.get("Popup").isNull()) annotation.get("Popup").delete("P");
+    }
+    const page = target.loadPage(target.countPages() - 1);
+    const pageObject = page.getObject();
+    const copied = map.graftObject(annotations);
+    const fields = new Set<number>();
+    for (let item = 0; item < copied.length; item += 1) {
+      const annotation = copied.get(item);
+      annotation.put("P", pageObject);
+      if (!annotation.get("Popup").isNull()) annotation.get("Popup").put("P", pageObject);
+      if (annotation.get("Subtype").asName() !== "Widget") continue;
+      let field = annotation;
+      while (!field.get("Parent").isNull()) field = field.get("Parent");
+      if (field.isIndirect()) fields.add(field.asIndirect());
+    }
+    pageObject.put("Annots", copied);
+    page.destroy();
+    if (!fields.size) return;
+    const list = acroFormFields(target);
+    for (let item = 0; item < list.length; item += 1) if (list.get(item).isIndirect()) fields.delete(list.get(item).asIndirect());
+    fields.forEach((number) => list.push(target.newIndirect(number)));
+    const sourceForm = source.getTrailer().get("Root").get("AcroForm");
+    const targetForm = target.getTrailer().get("Root").get("AcroForm");
+    for (const key of ["DR", "DA"])
+      if (!sourceForm.isNull() && targetForm.get(key).isNull() && !sourceForm.get(key).isNull())
+        targetForm.put(key, map.graftObject(sourceForm.get(key)));
+  };
+
+  /**
+   * Resizes a page in place: its content is scaled and centred into the new
+   * display size, and annotation geometry is transformed to match.
+   */
+  const resizePage = (target: Mupdf.PDFDocument, pageIndex: number, width: number, height: number) => {
+    let page = target.loadPage(pageIndex);
+    const before = frameOf(page);
+    const pageObject = page.getObject();
+    const rotate = pageObject.getInheritable("Rotate");
+    const sideways = ((((rotate.isNumber() ? rotate.asNumber() : 0) % 360) + 360) % 360) % 180 !== 0;
+    const scale = Math.min(width / before.width, height / before.height);
+    const dx = (width - before.width * scale) / 2;
+    const dy = (height - before.height * scale) / 2;
+    const box = target.newArray();
+    [0, 0, sideways ? height : width, sideways ? width : height].forEach((value) => box.push(value));
+    pageObject.put("MediaBox", box);
+    for (const key of ["CropBox", "TrimBox", "BleedBox", "ArtBox"]) pageObject.delete(key);
+    page.destroy();
+    page = target.loadPage(pageIndex);
+    const after = frameOf(page);
+    const map = multiply(multiply(invert(before.toUser), [scale, 0, 0, scale, dx, dy]), after.toUser);
+    const contents = pageObject.get("Contents");
+    const array = target.newArray();
+    array.push(target.addStream(new TextEncoder().encode(`q ${matrixString(map)} cm`), target.newDictionary()));
+    if (!contents.isNull()) {
+      if (contents.isArray()) for (let index = 0; index < contents.length; index += 1) array.push(contents.get(index));
+      else array.push(contents);
+    }
+    array.push(target.addStream(new TextEncoder().encode("Q"), target.newDictionary()));
+    pageObject.put("Contents", array);
+    // Annotation appearances follow their Rect, so transforming geometry suffices.
+    const transformPairs = (values: Mupdf.PDFObject) => {
+      for (let index = 0; index + 1 < values.length; index += 2) {
+        const [x, y] = apply(map, values.get(index).asNumber(), values.get(index + 1).asNumber());
+        values.put(index, x);
+        values.put(index + 1, y);
+      }
+    };
+    const annotations = pageObject.get("Annots");
+    for (let index = 0; !annotations.isNull() && index < annotations.length; index += 1) {
+      const annotation = annotations.get(index);
+      const rect = annotation.get("Rect");
+      if (rect.isArray() && rect.length === 4) {
+        transformPairs(rect);
+        const [x0, y0, x1, y1] = [0, 1, 2, 3].map((item) => rect.get(item).asNumber()) as [number, number, number, number];
+        [Math.min(x0, x1), Math.min(y0, y1), Math.max(x0, x1), Math.max(y0, y1)].forEach((value, item) => rect.put(item, value));
+      }
+      for (const key of ["QuadPoints", "Vertices", "L", "CL"]) {
+        const values = annotation.get(key);
+        if (values.isArray()) transformPairs(values);
+      }
+      const ink = annotation.get("InkList");
+      for (let stroke = 0; ink.isArray() && stroke < ink.length; stroke += 1) transformPairs(ink.get(stroke));
+    }
+    page.destroy();
+    return {
+      scale,
+      scaleX: (before.width * scale) / width,
+      scaleY: (before.height * scale) / height,
+      offsetX: dx / width,
+      offsetY: dy / height,
+    };
   };
 
   /** Adds one page per image, sized to A4 in the image's orientation. */
@@ -1659,7 +1804,23 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
       const target = open(sourceBytes!, password);
       const firstIndex = target.countPages();
       try {
+        const mappings: PageMapping[] = [];
         if (operation.type === "images") addImagePages(target, operation.images);
+        else if (operation.type === "resize") {
+          const source = open(sourceBytes!, password);
+          const map = target.newGraftMap();
+          try {
+            for (const index of operation.sources) {
+              if (index < 0 || index >= source.countPages()) throw new Error("A page to resize is unavailable.");
+              graftWithAnnotations(target, source, index, map);
+              const copy = target.countPages() - 1;
+              mappings.push({ source: index, target: copy, ...resizePage(target, copy, operation.width, operation.height) });
+            }
+          } finally {
+            map.destroy();
+            source.destroy();
+          }
+        }
         else if (operation.type === "blank") {
           target.insertPage(
             -1,
@@ -1670,15 +1831,17 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
             operation.type === "pdf"
               ? open(new Uint8Array(operation.bytes), operation.password)
               : open(sourceBytes!, password);
+          const map = target.newGraftMap();
           try {
             if (operation.type === "copy") {
               if (operation.source < 0 || operation.source >= source.countPages())
                 throw new Error("The page to duplicate is unavailable.");
-              target.graftPage(-1, source, operation.source);
+              graftWithAnnotations(target, source, operation.source, map);
             } else
               for (let index = 0; index < source.countPages(); index += 1)
-                target.graftPage(-1, source, index);
+                graftWithAnnotations(target, source, index, map);
           } finally {
+            map.destroy();
             source.destroy();
           }
         }
@@ -1688,7 +1851,7 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
         const needsSecret = reopened.needsPassword();
         reopened.destroy();
         const info = loadInto(bytes, needsSecret ? password : undefined);
-        return { ...info, bytes: copyBytes(bytes), firstIndex, count };
+        return { ...info, bytes: copyBytes(bytes), firstIndex, count, ...(mappings.length ? { mappings } : {}) };
       } finally {
         target.destroy();
       }

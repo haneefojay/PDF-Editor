@@ -60,6 +60,8 @@ import {
   RotateCcw,
   RotateCw,
   Ruler,
+  Scaling,
+  Scissors,
   ScanText,
   Search,
   SendToBack,
@@ -81,6 +83,7 @@ import {
   PASSWORD_INCORRECT,
   PASSWORD_REQUIRED,
   type AppendOperation,
+  type AppendResult,
   type FormField,
   type OutlineEntry,
   type PageLink,
@@ -100,7 +103,7 @@ import {
 } from "@paperless/editor-core";
 import { deleteProject, listProjects, loadProject, saveProject, type ProjectSummary } from "./persistence";
 import { MAX_ZOOM, MIN_ZOOM, useEditor } from "./store";
-import { configureNativeUi, isNativePlatform, registerBackHandler, savePdf } from "./platform";
+import { configureNativeUi, isNativePlatform, registerBackHandler, saveFile, savePdf } from "./platform";
 import { createOcrRecognizer, ocrLanguages, type OcrLanguage, type ScanEnhancement } from "./ocr";
 import { signPdfWithCertificate } from "./digital-signature";
 import { DocumentView, type DocumentViewHandle } from "./DocumentView";
@@ -112,6 +115,8 @@ import { dataUrlToBlob, downloadBlob, readAsDataUrl } from "./files";
 import { boundsOf } from "./geometry";
 import { layoutOverlays } from "./layout";
 import { findParagraph, reflowWidth } from "./paragraphs";
+import { createZip, describeGroup, parseRanges, splitEvery } from "./split";
+import { PAGE_SIZES, mapCrop, mapOverlay, mmToPoints, pointsToMm, presetOf, targetSize, type Orientation, type PageSizePreset } from "./pageSize";
 
 type Engine = ReturnType<typeof createPdfEngine>;
 type OpenDoc = {
@@ -208,8 +213,18 @@ export function App() {
   const [open, setOpen] = useState<OpenDoc | null>(null);
   const [tab, setTab] = useState<TabId>("edit");
   const [dialog, setDialog] = useState<
-    null | "properties" | "forms" | "find" | "ocr" | "pages" | "layout" | "compress" | "imageCrop" | "pageImages" | "security" | "shortcuts"
+    null | "properties" | "forms" | "find" | "ocr" | "pages" | "layout" | "compress" | "imageCrop" | "pageImages" | "security" | "shortcuts" | "split" | "pageSize"
   >(null);
+  const [splitMode, setSplitMode] = useState<"every" | "ranges">("every");
+  const [splitEveryDraft, setSplitEveryDraft] = useState(1);
+  const [splitRangesDraft, setSplitRangesDraft] = useState("");
+  const [sizeDraft, setSizeDraft] = useState<{ scope: "page" | "selected" | "all"; preset: PageSizePreset; orientation: Orientation; widthMm: number; heightMm: number }>({
+    scope: "page",
+    preset: "A4",
+    orientation: "keep",
+    widthMm: 210,
+    heightMm: 297,
+  });
   const [showComments, setShowComments] = useState(false);
   const [showRail, setShowRail] = useState(() => window.innerWidth > 760);
   const [passwordRequest, setPasswordRequest] = useState<PasswordRequest | null>(null);
@@ -960,6 +975,111 @@ export function App() {
   const rotatePages = (sources: number[], delta: number) => {
     const commands: Command[] = sources.map((source) => ({ type: "rotate", page: source, before: doc.rotations[source] ?? 0, after: (doc.rotations[source] ?? 0) + delta }));
     execute(commands.length === 1 ? commands[0]! : { type: "batch", commands });
+  };
+
+  /** Exports page groups as separate PDFs, bundled in a ZIP when there are several. */
+  const splitDocument = async (groups: number[][]) => {
+    if (!open || !groups.length) return;
+    setError("");
+    try {
+      const base = baseName(open.name);
+      const names = new Set<string>();
+      const files: { name: string; data: Uint8Array }[] = [];
+      for (const [index, group] of groups.entries()) {
+        setBusy(`Preparing file ${index + 1} of ${groups.length}…`);
+        const result = await withTimeout(api().exportDocument(exportRequest({ pageOrder: group.map((item) => doc.pageOrder[item]!) })), 120_000, "Splitting took too long.");
+        let name = `${base}-p${describeGroup(group)}.pdf`;
+        for (let copy = 2; names.has(name); copy += 1) name = `${base}-p${describeGroup(group)} (${copy}).pdf`;
+        names.add(name);
+        files.push({ name, data: result.bytes });
+      }
+      const message =
+        files.length === 1 ? await savePdf(files[0]!.data, files[0]!.name) : await saveFile(createZip(files), `${base}-split.zip`, "application/zip");
+      setNotice(`Split into ${files.length} file${files.length === 1 ? "" : "s"}. ${message}.`);
+      setDialog(null);
+    } catch (cause) {
+      fail(cause, "Splitting failed.");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const openPageSize = (scope: "page" | "selected" | "all") => {
+    const info = open?.pages[sourcePage];
+    const preset = info ? presetOf(info.width, info.height) : "A4";
+    setSizeDraft((draft) => ({
+      ...draft,
+      scope,
+      preset: preset === "custom" ? draft.preset : preset,
+      widthMm: info ? Math.round(pointsToMm(Math.min(info.width, info.height))) : draft.widthMm,
+      heightMm: info ? Math.round(pointsToMm(Math.max(info.width, info.height))) : draft.heightMm,
+    }));
+    setDialog("pageSize");
+  };
+
+  /** Replaces pages with copies fitted to a new size, moving their edits along. Undoable. */
+  const resizePages = async (indexes: number[], size: { width: number; height: number }, orientation: Orientation) => {
+    if (!open || !indexes.length) return;
+    // Sizes are chosen for the page as shown, but the engine works before the user's rotation.
+    const groups = new Map<string, { width: number; height: number; sources: number[] }>();
+    for (const index of indexes) {
+      const source = doc.pageOrder[index]!;
+      const info = open.pages[source]!;
+      const sideways = (((doc.rotations[source] ?? 0) % 360) + 360) % 180 !== 0;
+      const shown = targetSize(size, orientation, sideways ? { width: info.height, height: info.width } : info);
+      const stored = sideways ? { width: shown.height, height: shown.width } : shown;
+      if (Math.abs(stored.width - info.width) < 0.5 && Math.abs(stored.height - info.height) < 0.5) continue;
+      const key = `${stored.width.toFixed(2)}x${stored.height.toFixed(2)}`;
+      const group = groups.get(key) ?? { ...stored, sources: [] };
+      if (!group.sources.includes(source)) group.sources.push(source);
+      groups.set(key, group);
+    }
+    if (!groups.size) {
+      setNotice(indexes.length === 1 ? "The page already has that size." : "The pages already have that size.");
+      setDialog(null);
+      return;
+    }
+    setBusy("Resizing pages…");
+    setError("");
+    try {
+      const replaced = new Map<number, number>();
+      const overlays: Overlay[] = [];
+      const commands: Command[] = [];
+      let result: AppendResult | null = null;
+      for (const group of groups.values()) {
+        result = await withTimeout(api().appendPages({ type: "resize", ...group }), 60_000, "Resizing took too long.");
+        for (const mapping of result.mappings ?? []) {
+          replaced.set(mapping.source, mapping.target);
+          overlays.push(...doc.overlays.filter((overlay) => overlay.page === mapping.source).map((overlay) => mapOverlay(overlay, mapping, mapping.target)));
+          const rotation = doc.rotations[mapping.source];
+          if (rotation) commands.push({ type: "rotate", page: mapping.target, before: 0, after: rotation });
+          const crop = doc.crops[mapping.source];
+          if (crop) commands.push({ type: "setCrop", page: mapping.target, before: null, after: mapCrop(crop, mapping) });
+        }
+      }
+      const final = result!;
+      commands.unshift({ type: "setPageOrder", before: doc.pageOrder, after: doc.pageOrder.map((source) => replaced.get(source) ?? source) });
+      if (overlays.length) commands.push({ type: "addMany", overlays });
+      const bytes = new Uint8Array(final.bytes.byteLength);
+      bytes.set(final.bytes);
+      setOpen((currentDoc) =>
+        currentDoc && {
+          ...currentDoc,
+          bytes: bytes.buffer,
+          pages: final.pages,
+          formFields: final.formFields,
+          initialFormValues: { ...Object.fromEntries(final.formFields.map((field) => [field.name, field.value])), ...currentDoc.initialFormValues },
+        },
+      );
+      execute({ type: "batch", commands });
+      const count = [...groups.values()].reduce((sum, group) => sum + group.sources.length, 0);
+      setNotice(`Resized ${count} page${count === 1 ? "" : "s"}. Undo restores the original size.`);
+      setDialog(null);
+    } catch (cause) {
+      fail(cause, "The pages could not be resized.");
+    } finally {
+      setBusy("");
+    }
   };
 
   const addOverlays = (overlays: Overlay[]) => {
@@ -1890,6 +2010,8 @@ export function App() {
         { key: "imagePages", label: "Images as pages", Icon: Images, action: () => inputs.imagePages.current?.click(), title: "Insert photos or scans as new pages" },
         { key: "merge", label: "Append PDF", Icon: FileOutput, action: () => inputs.merge.current?.click(), title: "Add another PDF at the end" },
         { key: "pageImage", label: "Page to image", Icon: ImageDown, action: () => void savePageImage(), title: "Save this page as a PNG image" },
+        { key: "split", label: "Split", Icon: Scissors, action: () => setDialog("split"), title: "Split into several PDFs by page ranges", disabled: doc.pageOrder.length < 2 },
+        { key: "pageSize", label: "Page size", Icon: Scaling, action: () => openPageSize("page"), title: "Change the paper size, scaling the content to fit" },
         { key: "extract", label: "Extract page", Icon: FileOutput, action: () => void exportPages([sourcePage], `${baseName(open.name)}-page-${page + 1}.pdf`, `Page ${page + 1} exported.`), title: "Save this page as its own PDF" },
         { key: "layout", label: "Header & footer", Icon: LayoutTemplate, action: openLayout, title: "Headers, footers, page numbers, watermark, Bates numbering" },
         { key: "deletePage", label: "Delete page", Icon: Trash2, action: () => removePages([page]), disabled: doc.pageOrder.length < 2 },
@@ -2953,6 +3075,12 @@ export function App() {
             <button disabled={!selectedPages.length} onClick={() => void exportPages([...selectedPages].sort((a, b) => a - b).map((index) => doc.pageOrder[index]!), `${baseName(open.name)}-extracted.pdf`, `Extracted ${selectedPages.length} page${selectedPages.length === 1 ? "" : "s"}.`)}>
               <FileOutput /> Extract
             </button>
+            <button disabled={!selectedPages.length} onClick={() => openPageSize("selected")}>
+              <Scaling /> Page size
+            </button>
+            <button disabled={doc.pageOrder.length < 2} onClick={() => setDialog("split")}>
+              <Scissors /> Split…
+            </button>
             <button className="danger" disabled={!selectedPages.length || selectedPages.length >= doc.pageOrder.length} onClick={() => removePages(selectedPages)}>
               <Trash2 /> Delete
             </button>
@@ -2980,6 +3108,116 @@ export function App() {
           </div>
         </Modal>
       )}
+
+      {dialog === "split" && (() => {
+        const plan = splitMode === "every" ? splitEvery(splitEveryDraft, doc.pageOrder.length) : parseRanges(splitRangesDraft, doc.pageOrder.length);
+        return (
+          <Modal
+            title="Split document"
+            description="Save parts of this document as separate PDFs with their edits. Several files are saved together as a ZIP."
+            onClose={() => setDialog(null)}
+            footer={
+              <>
+                <button onClick={() => setDialog(null)}>Cancel</button>
+                <button className="primary" disabled={"error" in plan || Boolean(busy)} onClick={() => "groups" in plan && void splitDocument(plan.groups)}>
+                  {"groups" in plan ? `Save ${plan.groups.length} file${plan.groups.length === 1 ? "" : "s"}` : "Save"}
+                </button>
+              </>
+            }
+          >
+            <div className="segmented" role="radiogroup" aria-label="Split by">
+              <button role="radio" aria-checked={splitMode === "every"} className={splitMode === "every" ? "active" : ""} onClick={() => setSplitMode("every")}>Every N pages</button>
+              <button role="radio" aria-checked={splitMode === "ranges"} className={splitMode === "ranges" ? "active" : ""} onClick={() => setSplitMode("ranges")}>Page ranges</button>
+            </div>
+            <div className="fieldGrid">
+              {splitMode === "every" ? (
+                <label>
+                  Pages per file
+                  <NumberField label="Pages per file" value={splitEveryDraft} min={1} max={doc.pageOrder.length} onCommit={setSplitEveryDraft} />
+                </label>
+              ) : (
+                <label>
+                  Ranges, one file each
+                  <input autoFocus value={splitRangesDraft} placeholder={`e.g. 1-3, 4, 5-${doc.pageOrder.length}`} onChange={(event) => setSplitRangesDraft(event.target.value)} />
+                </label>
+              )}
+            </div>
+            <p className={"error" in plan ? "fieldError" : "splitSummary"} role="status">
+              {"error" in plan
+                ? plan.error
+                : `${plan.groups.length} file${plan.groups.length === 1 ? "" : "s"}: pages ${plan.groups.slice(0, 8).map(describeGroup).join(", ")}${plan.groups.length > 8 ? ", …" : ""}`}
+            </p>
+          </Modal>
+        );
+      })()}
+
+      {dialog === "pageSize" && (() => {
+        const indexes = sizeDraft.scope === "all" ? doc.pageOrder.map((_, index) => index) : sizeDraft.scope === "selected" && selectedPages.length ? [...selectedPages].sort((a, b) => a - b) : [page];
+        const size = sizeDraft.preset === "custom" ? { width: mmToPoints(sizeDraft.widthMm), height: mmToPoints(sizeDraft.heightMm) } : PAGE_SIZES[sizeDraft.preset];
+        const info = open.pages[sourcePage];
+        return (
+          <Modal
+            title="Page size"
+            description="Content is scaled to fit the new paper size and centred. Undo restores the original pages."
+            onClose={() => setDialog(null)}
+            footer={
+              <>
+                <button onClick={() => setDialog(null)}>Cancel</button>
+                <button className="primary" disabled={Boolean(busy)} onClick={() => void resizePages(indexes, size, sizeDraft.orientation)}>
+                  Resize {indexes.length === 1 ? "page" : `${indexes.length} pages`}
+                </button>
+              </>
+            }
+          >
+            {info && (
+              <p className="splitSummary">
+                Page {page + 1} is {Math.round(pointsToMm(info.width))} × {Math.round(pointsToMm(info.height))} mm{presetOf(info.width, info.height) !== "custom" ? ` (${presetOf(info.width, info.height)})` : ""}.
+              </p>
+            )}
+            <div className="fieldGrid">
+              <label>
+                Pages
+                <select value={sizeDraft.scope} onChange={(event) => setSizeDraft({ ...sizeDraft, scope: event.target.value as typeof sizeDraft.scope })}>
+                  <option value="page">This page</option>
+                  {selectedPages.length > 1 && <option value="selected">Selected pages ({selectedPages.length})</option>}
+                  <option value="all">All pages</option>
+                </select>
+              </label>
+              <label>
+                Paper size
+                <select value={sizeDraft.preset} onChange={(event) => setSizeDraft({ ...sizeDraft, preset: event.target.value as PageSizePreset })}>
+                  {(Object.keys(PAGE_SIZES) as (keyof typeof PAGE_SIZES)[]).map((key) => (
+                    <option key={key} value={key}>
+                      {PAGE_SIZES[key].label} ({Math.round(pointsToMm(PAGE_SIZES[key].width))} × {Math.round(pointsToMm(PAGE_SIZES[key].height))} mm)
+                    </option>
+                  ))}
+                  <option value="custom">Custom</option>
+                </select>
+              </label>
+              {sizeDraft.preset === "custom" && (
+                <>
+                  <label>
+                    Width (mm)
+                    <NumberField label="Width (mm)" value={sizeDraft.widthMm} min={20} max={5000} onCommit={(widthMm) => setSizeDraft({ ...sizeDraft, widthMm })} />
+                  </label>
+                  <label>
+                    Height (mm)
+                    <NumberField label="Height (mm)" value={sizeDraft.heightMm} min={20} max={5000} onCommit={(heightMm) => setSizeDraft({ ...sizeDraft, heightMm })} />
+                  </label>
+                </>
+              )}
+              <label>
+                Orientation
+                <select value={sizeDraft.orientation} onChange={(event) => setSizeDraft({ ...sizeDraft, orientation: event.target.value as Orientation })}>
+                  <option value="keep">Keep each page's orientation</option>
+                  <option value="portrait">Portrait</option>
+                  <option value="landscape">Landscape</option>
+                </select>
+              </label>
+            </div>
+          </Modal>
+        );
+      })()}
 
       {dialog === "layout" && (
         <Modal

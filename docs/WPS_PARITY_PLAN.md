@@ -6,13 +6,13 @@ WPS Office's PDF tool sets the bar this plan aims for. It covers reading, editin
 
 | Area | WPS | Paperless today | Gap |
 | --- | --- | --- | --- |
-| Reading | Continuous scroll, outline, links, night mode, full screen, read aloud | One page at a time, thumbnails, search | Large: the reader is the first thing people use |
-| Mobile UI | Bottom toolbar, tool trays, gestures, immersive reading | Responsive desktop layout | Large |
-| Edit text | Paragraph editing with reflow | Line/run editing, font-faithful export | Medium |
-| Edit objects | Move, resize, replace, delete existing images | Replace/extract only | Medium |
-| Annotate | Highlight, pens, highlighter pen, eraser, shapes, notes, stamps | All except highlighter pen and eraser | Small |
+| Reading | Continuous scroll, outline, links, night mode, full screen, read aloud | All except read aloud (M1) | Small |
+| Mobile UI | Bottom toolbar, tool trays, gestures, immersive reading | Done (M1) | — |
+| Edit text | Paragraph editing with reflow | Done (M2), with line editing for mixed-style text | — |
+| Edit objects | Move, resize, replace, delete existing images | Done (M2) | — |
+| Annotate | Highlight, pens, highlighter pen, eraser, shapes, notes, stamps | Done (M2) | — |
 | Fill & sign | Fill, create fields, signatures | Done, including certificates | — |
-| Pages | Merge, split, insert, extract, rotate, crop, resize | All except split into files and page resize | Small |
+| Pages | Merge, split, insert, extract, rotate, crop, resize | Done (M2) | — |
 | Protect | Encrypt, permissions, redact | Done | — |
 | Convert | PDF ↔ Word/Excel/PPT, images, text | Images ↔ PDF, text | Large: Word/Excel/PPT |
 | Scan | Camera capture, edge detection, perspective fix, OCR | OCR on existing pages | Large on mobile |
@@ -32,11 +32,12 @@ WPS Office's PDF tool sets the bar this plan aims for. It covers reading, editin
 - Navigate with the document outline (bookmarks) and with clickable internal and external links.
 - Night and sepia reading themes for the page.
 
-### M2. Editing depth
+### M2. Editing depth (done)
 - Paragraph editing: group lines into paragraphs and reflow them inside the original box.
 - Move, resize, rotate and delete existing images, with the original removed safely.
 - A semi-transparent highlighter pen, and an eraser for ink strokes.
 - Split a document into files by page ranges or every N pages, and change page size.
+- Also fixed along the way: copied pages (duplicate, insert PDF, resize) keep their annotations and form fields, and exports keep the document's form, language and viewer settings.
 
 ### M3. Scan to PDF (mobile)
 - Camera capture with automatic edge detection.

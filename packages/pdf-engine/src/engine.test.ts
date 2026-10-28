@@ -527,3 +527,100 @@ describe("highlighter strokes", () => {
     doc.destroy();
   });
 });
+
+describe("resizing pages", () => {
+  it("fits content and annotations into the new size and reports the mapping", async () => {
+    const doc = new mupdf.PDFDocument();
+    const resources = doc.newDictionary();
+    const fonts = doc.newDictionary();
+    fonts.put("F1", doc.addSimpleFont(new mupdf.Font("Helvetica")));
+    resources.put("Font", fonts);
+    doc.insertPage(-1, doc.addPage([0, 0, 600, 800], 0, resources, "BT /F1 20 Tf 100 700 Td (Corner) Tj ET"));
+    const page = doc.loadPage(0);
+    const ink = page.createAnnotation("Ink");
+    ink.setInkList([[[300, 400], [400, 400]]]);
+    ink.update();
+    const bytes = new Uint8Array(doc.saveToBuffer("").asUint8Array()).buffer;
+    doc.destroy();
+
+    const engine = await engineWith(bytes);
+    const before = (await engine.extractTextLines(0))[0]!;
+    const result = await engine.appendPages({ type: "resize", sources: [0], width: 300, height: 300 });
+    expect(result.firstIndex).toBe(1);
+    expect(result.pages[1]).toEqual({ width: 300, height: 300 });
+    const [mapping] = result.mappings!;
+    expect(mapping!.scale).toBeCloseTo(0.375);
+    expect(mapping!.offsetX).toBeCloseTo((300 - 225) / 2 / 300);
+    expect(mapping!.offsetY).toBeCloseTo(0);
+
+    const after = (await engine.extractTextLines(1))[0]!;
+    expect(after.text).toBe("Corner");
+    expect(after.x).toBeCloseTo(before.x * mapping!.scaleX + mapping!.offsetX, 2);
+    expect(after.baseline).toBeCloseTo(before.baseline * mapping!.scaleY + mapping!.offsetY, 2);
+    expect(after.size).toBeCloseTo(20 * 0.375, 1);
+
+    const exported = await engine.exportDocument(request({ pageOrder: [1] }));
+    const out = mupdf.Document.openDocument(exported.bytes, "application/pdf") as mupdf.PDFDocument;
+    const [annotation] = out.loadPage(0).getAnnotations();
+    const start = (annotation!.getInkList() as [number, number][][])[0]![0];
+    // (300, 400) user → display (300, 400) → scaled and centred.
+    expect(start![0]).toBeCloseTo(300 * 0.375 + 37.5, 0);
+    expect(start![1]).toBeCloseTo(400 * 0.375, 0);
+    out.destroy();
+  });
+});
+
+describe("copying pages with annotations", () => {
+  const annotated = () => {
+    const doc = new mupdf.PDFDocument();
+    doc.insertPage(-1, doc.addPage([0, 0, 400, 400], 0, doc.newDictionary(), ""));
+    const page = doc.loadPage(0);
+    const note = page.createAnnotation("Text");
+    note.setRect([50, 300, 70, 320]);
+    note.setContents("Look here");
+    note.update();
+    const field = page.createAnnotation("Widget");
+    field.setRect([50, 100, 250, 130]);
+    const object = field.getObject();
+    object.put("FT", doc.newName("Tx"));
+    object.put("T", doc.newString("name"));
+    object.put("V", doc.newString("Ada"));
+    const root = doc.getTrailer().get("Root");
+    const form = doc.newDictionary();
+    const fields = doc.newArray();
+    fields.push(object);
+    form.put("Fields", fields);
+    root.put("AcroForm", form);
+    field.update();
+    const bytes = new Uint8Array(doc.saveToBuffer("").asUint8Array()).buffer;
+    doc.destroy();
+    return bytes;
+  };
+
+  const inspect = (bytes: Uint8Array, index: number) => {
+    const out = mupdf.Document.openDocument(bytes, "application/pdf") as mupdf.PDFDocument;
+    const page = out.loadPage(index);
+    const notes = page.getAnnotations().map((annotation) => annotation.getContents());
+    const widgets = page.getWidgets().map((widget) => widget.getValue());
+    const fieldCount = out.getTrailer().get("Root").get("AcroForm").get("Fields").length;
+    out.destroy();
+    return { notes, widgets, fieldCount };
+  };
+
+  it("keeps notes and form fields on duplicated pages", async () => {
+    const engine = await engineWith(annotated());
+    const copy = await engine.appendPages({ type: "copy", source: 0 });
+    expect(inspect(copy.bytes, 1)).toEqual({ notes: ["Look here"], widgets: ["Ada"], fieldCount: 2 });
+    const exported = await engine.exportDocument(request({ pageOrder: [0, 1] }));
+    expect(inspect(exported.bytes, 1)).toEqual({ notes: ["Look here"], widgets: ["Ada"], fieldCount: 2 });
+    // Exporting a subset keeps only the fields on exported pages.
+    const subset = await engine.exportDocument(request({ pageOrder: [1] }));
+    expect(inspect(subset.bytes, 0)).toEqual({ notes: ["Look here"], widgets: ["Ada"], fieldCount: 1 });
+  });
+
+  it("keeps them when inserting another PDF", async () => {
+    const engine = await engineWith(makePdf([{}]));
+    const imported = await engine.appendPages({ type: "pdf", bytes: annotated() });
+    expect(inspect(imported.bytes, 1)).toEqual({ notes: ["Look here"], widgets: ["Ada"], fieldCount: 1 });
+  });
+});
