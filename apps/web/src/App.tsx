@@ -126,6 +126,7 @@ type OpenDoc = {
 };
 type FindResult = { sourcePage: number; line: PositionedTextLine; overlayId?: string };
 type TabId = "edit" | "comment" | "sign" | "pages" | "tools";
+type PageImageBox = Omit<PageImage, "dataUrl">;
 type ReviewOverlay = Extract<Overlay, { kind: "markup" | "note" | "stamp" | "attachment" | "measurement" }>;
 type TextOverlay = Extract<Overlay, { kind: "text" }>;
 type PasswordRequest = { name: string; incorrect: boolean; resolve: (password: string | null) => void };
@@ -280,7 +281,7 @@ export function App() {
   const [security, setSecurity] = useState({ userPassword: "", ownerPassword: "", allowPrint: true, allowCopy: true, allowEdit: false, allowAnnotate: true, sanitizeMetadata: false, flattenForms: false });
   const [lastAudit, setLastAudit] = useState<{ generatedAt: string; document: string; pages: number[]; areas: number; verified: boolean } | null>(null);
   // Text runs and links per source page, fetched as pages come into view.
-  const [pageData, setPageData] = useState<Map<number, { lines: PositionedTextLine[]; links: PageLink[] }>>(new Map());
+  const [pageData, setPageData] = useState<Map<number, { lines: PositionedTextLine[]; links: PageLink[]; images: PageImageBox[] }>>(new Map());
   const [outline, setOutline] = useState<OutlineEntry[]>([]);
   const [railTab, setRailTab] = useState<"pages" | "outline">("pages");
   const [readingTheme, setReadingTheme] = useState<"day" | "night" | "sepia">(() => {
@@ -534,10 +535,11 @@ export function App() {
         void Promise.all([
           withTimeout(api().extractTextLines(source), 20_000, "Reading page text took too long."),
           api().getLinks(source).catch(() => [] as PageLink[]),
+          api().listPageImages(source).catch(() => [] as PageImageBox[]),
         ])
-          .then(([lines, links]) => {
+          .then(([lines, links, images]) => {
             if (bytes !== currentBytes.current) return;
-            setPageData((current) => new Map(current).set(source, { lines, links }));
+            setPageData((current) => new Map(current).set(source, { lines, links, images }));
           })
           .catch(() => pageDataLoading.current.delete(source));
       }
@@ -1073,6 +1075,23 @@ export function App() {
       setDialog("pageImages");
     } catch (cause) {
       fail(cause, "Page images could not be extracted.");
+    } finally {
+      setBusy("");
+    }
+  };
+  /** Turns an image that is part of the page into an object that can be moved, resized, rotated or deleted. */
+  const liftImage = async (source: number, box: PageImageBox) => {
+    setBusy("Preparing image…");
+    try {
+      const image = (await api().extractPageImages(source)).find((item) => item.id === box.id);
+      if (!image) throw new Error("That image could not be read.");
+      const area = { x: box.x, y: box.y, width: box.width, height: box.height };
+      const overlay: Overlay = { id: crypto.randomUUID(), page: source, kind: "image", ...area, dataUrl: image.dataUrl, name: `page-${doc.pageOrder.indexOf(source) + 1}-image.png`, opacity: 1, rotation: 0 };
+      execute({ type: "addMany", overlays: [{ id: crypto.randomUUID(), page: source, kind: "redact", ...area, color: "#ffffff", mode: "eraseImage" }, overlay] });
+      setSelectedId(overlay.id);
+      setNotice("Drag to move, use the handles to resize or rotate, or press Delete to remove the image.");
+    } catch (cause) {
+      fail(cause, "The image could not be edited.");
     } finally {
       setBusy("");
     }
@@ -2492,6 +2511,8 @@ export function App() {
                         textLines={lines}
                         textEditable={tab === "edit" && (!isPhone || trayOpen)}
                         links={pageData.get(source)?.links ?? []}
+                        pageImages={tab === "edit" && (!isPhone || trayOpen) ? (pageData.get(source)?.images ?? []) : []}
+                        onLiftImage={(image) => void liftImage(source, image)}
                         onLink={followLink}
                         originalEdit={originalEdit?.source === source ? originalEdit : null}
                         crop={doc.crops[source]}

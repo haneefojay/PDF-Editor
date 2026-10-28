@@ -24,6 +24,7 @@ import type {
 } from "./protocol";
 import { PASSWORD_INCORRECT, PASSWORD_REQUIRED } from "./protocol";
 import { bundledFontBase64 } from "./fontData";
+import { blankRanges, findXObjectDraws } from "./contentStream";
 
 type MupdfModule = typeof Mupdf;
 type Matrix = [number, number, number, number, number, number];
@@ -827,10 +828,9 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
     const original: Mupdf.PDFObject[] = [];
     const contents = pageObject.get("Contents");
     if (!contents.isNull()) {
-      const resolved = contents.resolve();
-      if (resolved.isArray())
-        for (let index = 0; index < resolved.length; index += 1)
-          original.push(resolved.get(index));
+      if (contents.isArray())
+        for (let index = 0; index < contents.length; index += 1)
+          original.push(contents.get(index));
       else original.push(contents);
     }
     const array = target.newArray();
@@ -842,6 +842,69 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
     if (drawing.after.length) array.push(wrap(drawing.after));
     pageObject.put("Contents", array);
     page.destroy();
+  };
+
+  /**
+   * Removes the exact `Do` that draws each image covering an area, so the
+   * content behind it survives. Returns the areas no image draw matched.
+   */
+  const removeImageDraws = <T extends { x: number; y: number; width: number; height: number }>(
+    target: Mupdf.PDFDocument,
+    pageIndex: number,
+    areas: T[],
+  ): T[] => {
+    const page = target.loadPage(pageIndex);
+    try {
+      const pageObject = page.getObject();
+      const ctm = page.getTransform() as Matrix;
+      const bounds = page.getBounds();
+      const width = bounds[2] - bounds[0];
+      const height = bounds[3] - bounds[1];
+      const contents = pageObject.get("Contents");
+      if (contents.isNull()) return areas;
+      // Never resolve() stream references: MuPDF.js then drops their data on
+      // a later garbage-collecting save. Indirect objects resolve internally.
+      const streams: Mupdf.PDFObject[] = [];
+      if (contents.isArray()) for (let index = 0; index < contents.length; index += 1) streams.push(contents.get(index));
+      else streams.push(contents);
+      const bytes = streams.map((stream) => new Uint8Array(stream.readStream().asUint8Array()));
+      const xobjects = pageObject.getInheritable("Resources").get("XObject");
+      const draws = findXObjectDraws(bytes).flatMap((draw) => {
+        const object = xobjects.isNull() ? null : xobjects.get(draw.name);
+        if (!object?.isStream() || object.get("Subtype").asName() !== "Image") return [];
+        const toPage = multiply(draw.matrix, ctm);
+        const corners = [apply(toPage, 0, 0), apply(toPage, 1, 0), apply(toPage, 0, 1), apply(toPage, 1, 1)];
+        const xs = corners.map(([x]) => (x - bounds[0]) / width);
+        const ys = corners.map(([, y]) => (y - bounds[1]) / height);
+        const box = { x: Math.min(...xs), y: Math.min(...ys), width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) };
+        return [{ ...draw, box }];
+      });
+      const overlap = (a: { x: number; y: number; width: number; height: number }, b: typeof a) => {
+        const w = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x);
+        const h = Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y);
+        if (w <= 0 || h <= 0) return 0;
+        const intersection = w * h;
+        return intersection / (a.width * a.height + b.width * b.height - intersection);
+      };
+      const used = new Set<(typeof draws)[number]>();
+      const unmatched: T[] = [];
+      for (const area of areas) {
+        const best = draws.filter((draw) => !used.has(draw)).sort((a, b) => overlap(b.box, area) - overlap(a.box, area))[0];
+        if (best && overlap(best.box, area) > 0.9) used.add(best);
+        else unmatched.push(area);
+      }
+      if (!used.size) return areas;
+      const array = target.newArray();
+      bytes.forEach((data, index) => {
+        const ranges = [...used].filter((draw) => draw.stream === index);
+        // A new stream object, so content shared with other pages is untouched.
+        array.push(ranges.length ? target.addStream(blankRanges(data, ranges), target.newDictionary()) : streams[index]!);
+      });
+      pageObject.put("Contents", array);
+      return unmatched;
+    } finally {
+      page.destroy();
+    }
   };
 
   const exportDocument = async (request: ExportRequest) => {
@@ -911,6 +974,12 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
         redactions.set(overlay.page, byMode);
       }
       for (const [pageIndex, byMode] of redactions) {
+        const images = byMode.get("eraseImage");
+        if (images) {
+          const remaining = removeImageDraws(target, pageIndex, images);
+          if (remaining.length) byMode.set("eraseImage", remaining);
+          else byMode.delete("eraseImage");
+        }
         for (const [mode, items] of byMode) {
           const page = target.loadPage(pageIndex);
           for (const item of items) {
@@ -1489,6 +1558,32 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
             dataUrl: `data:image/png;base64,${toBase64(pixmap.asPNG())}`,
           });
           pixmap.destroy();
+        },
+      });
+      structured.destroy();
+      page.destroy();
+      return images;
+    },
+
+    async listPageImages(index) {
+      const page = requireDoc().loadPage(index);
+      const bounds = page.getBounds();
+      const width = bounds[2] - bounds[0];
+      const height = bounds[3] - bounds[1];
+      const structured = page.toStructuredText("preserve-images");
+      const images: Omit<PageImage, "dataUrl">[] = [];
+      let imageIndex = 0;
+      structured.walk({
+        onImageBlock: (bbox, _transform, image) => {
+          images.push({
+            id: `${index}-${imageIndex++}`,
+            x: (bbox[0] - bounds[0]) / width,
+            y: (bbox[1] - bounds[1]) / height,
+            width: (bbox[2] - bbox[0]) / width,
+            height: (bbox[3] - bbox[1]) / height,
+            pixelWidth: image.getWidth(),
+            pixelHeight: image.getHeight(),
+          });
         },
       });
       structured.destroy();

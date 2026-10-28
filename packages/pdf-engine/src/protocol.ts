@@ -146,6 +146,8 @@ export interface PdfWorkerApi {
   extractText(index: number): Promise<string>;
   extractTextLines(index: number): Promise<PositionedTextLine[]>;
   extractPageImages(index: number): Promise<PageImage[]>;
+  /** Image positions on a page, without decoding the pixels. */
+  listPageImages(index: number): Promise<Omit<PageImage, "dataUrl">[]>;
   /** The document outline (bookmarks), flattened in reading order. */
   getOutline(): Promise<OutlineEntry[]>;
   getLinks(index: number): Promise<PageLink[]>;

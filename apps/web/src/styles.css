@@ -2131,3 +2131,48 @@ details.more > div label {
   margin: 0;
   padding: 5px;
 }
+
+.embeddedImageHit {
+  position: absolute;
+  padding: 0;
+  border: 1px dashed transparent;
+  background: transparent;
+  cursor: pointer;
+}
+.embeddedImageHit:hover,
+.embeddedImageHit:focus-visible {
+  border-color: #2f6fedaa;
+  background: #2f6fed12;
+}
+.rotateHandle {
+  position: absolute;
+  left: 50%;
+  top: -34px;
+  width: 22px;
+  height: 22px;
+  margin-left: -11px;
+  padding: 0;
+  border: 3px solid white;
+  border-radius: 50%;
+  background: var(--select);
+  box-shadow: 0 1px 4px #0005;
+  cursor: grab;
+  touch-action: none;
+}
+.rotateHandle::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 100%;
+  width: 1.5px;
+  height: 12px;
+  background: var(--select);
+}
+@media (pointer: coarse) {
+  .rotateHandle {
+    width: 28px;
+    height: 28px;
+    margin-left: -14px;
+    top: -42px;
+  }
+}

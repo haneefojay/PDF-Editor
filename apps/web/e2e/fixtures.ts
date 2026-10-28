@@ -101,3 +101,30 @@ export function paragraphPdf() {
   doc.destroy();
   return bytes;
 }
+
+/** A black image drawn on a blue panel. */
+export function imageOnPanelPdf() {
+  const doc = new mupdf.PDFDocument();
+  const pixmap = new mupdf.Pixmap(mupdf.ColorSpace.DeviceRGB, [0, 0, 40, 40], false);
+  pixmap.clear(0);
+  const resources = doc.newDictionary();
+  const xobjects = doc.newDictionary();
+  xobjects.put("Im1", doc.addImage(new mupdf.Image(pixmap)));
+  resources.put("XObject", xobjects);
+  const content = "0 0 1 rg 60 400 400 300 re f q 120 0 0 120 100 500 cm /Im1 Do Q";
+  doc.insertPage(-1, doc.addPage([0, 0, 600, 800], 0, resources, content));
+  const bytes = Buffer.from(doc.saveToBuffer("").asUint8Array());
+  doc.destroy();
+  return bytes;
+}
+
+/** RGB of a page pixel at normalized coordinates. */
+export function colourAt(bytes: Buffer, x: number, y: number, page = 0) {
+  const doc = mupdf.Document.openDocument(bytes, "application/pdf");
+  const pixmap = doc.loadPage(page).toPixmap([1, 0, 0, 1, 0, 0], mupdf.ColorSpace.DeviceRGB, false, true);
+  const offset = (Math.round(y * (pixmap.getHeight() - 1)) * pixmap.getWidth() + Math.round(x * (pixmap.getWidth() - 1))) * pixmap.getNumberOfComponents();
+  const pixels = pixmap.getPixels();
+  const rgb = [pixels[offset]!, pixels[offset + 1]!, pixels[offset + 2]!];
+  doc.destroy();
+  return rgb;
+}

@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
-import { inspectPdf, longPdf, PARAGRAPH_LINES, paragraphPdf, pngImage, samplePdf } from "./fixtures";
-import { clickOnPage, dragOnPage, exportPdf, fitPage, openSample, tab, tool } from "./helpers";
+import { colourAt, imageOnPanelPdf, inspectPdf, longPdf, PARAGRAPH_LINES, paragraphPdf, pngImage, samplePdf } from "./fixtures";
+import { clickOnPage, dragOnPage, exportPdf, fitPage, openSample, pageAt, tab, tool } from "./helpers";
 
 test("edits original text without disturbing the table around it", async ({ page }) => {
   await openSample(page);
@@ -226,4 +226,25 @@ test("can fall back to editing a single line of a paragraph", async ({ page }) =
   const text = inspectPdf(await exportPdf(page)).pages[0]!.text;
   expect(text).toContain("never leave this laptop.");
   expect(text).toContain(PARAGRAPH_LINES[3]!);
+});
+
+test("moves an image that is part of the page without leaving a hole", async ({ page }) => {
+  await openSample(page, imageOnPanelPdf(), "image.pdf");
+  await fitPage(page);
+  const hit = page.getByRole("button", { name: /^Edit image/ });
+  await hit.click();
+  await expect(page.locator(".objectBox.selected")).toBeVisible();
+  // Image centre is at (160, 240) of a 600×800 page; drag it 200pt right.
+  const box = (await page.locator(".objectBox.selected").boundingBox())!;
+  const pageBox = (await pageAt(page).boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2 + (pageBox.width * 200) / 600, box.y + box.height / 2, { steps: 8 });
+  await page.mouse.up();
+  const bytes = await exportPdf(page);
+  // Where the image was, the blue panel shows through.
+  expect(colourAt(bytes, 160 / 600, 240 / 800)).toEqual([0, 0, 255]);
+  // The image is drawn at its new place.
+  const moved = colourAt(bytes, 360 / 600, 240 / 800);
+  expect(Math.max(...moved)).toBeLessThan(40);
 });

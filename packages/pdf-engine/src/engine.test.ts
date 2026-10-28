@@ -468,3 +468,48 @@ describe("erasing one line of tightly spaced text", () => {
     expect(text).toContain("Third line stays put.");
   });
 });
+
+describe("removing embedded images", () => {
+  function imagePdf() {
+    const doc = new mupdf.PDFDocument();
+    const pixmap = new mupdf.Pixmap(mupdf.ColorSpace.DeviceRGB, [0, 0, 20, 20], false);
+    pixmap.clear(0);
+    const resources = doc.newDictionary();
+    const xobjects = doc.newDictionary();
+    xobjects.put("Im1", doc.addImage(new mupdf.Image(pixmap)));
+    resources.put("XObject", xobjects);
+    // A blue panel with the image drawn on it, and the same image again below.
+    const content = "0 0 1 rg 50 400 300 200 re f q 100 0 0 80 100 450 cm /Im1 Do Q q 50 0 0 50 400 100 cm /Im1 Do Q";
+    doc.insertPage(-1, doc.addPage([0, 0, 600, 800], 0, resources, content));
+    const bytes = doc.saveToBuffer("").asUint8Array();
+    doc.destroy();
+    return new Uint8Array(bytes).buffer;
+  }
+  const colourAt = (bytes: Uint8Array, x: number, y: number) => {
+    const doc = mupdf.Document.openDocument(bytes, "application/pdf");
+    const pixmap = doc.loadPage(0).toPixmap([1, 0, 0, 1, 0, 0], mupdf.ColorSpace.DeviceRGB, false, true);
+    const offset = (Math.round(y * pixmap.getHeight()) * pixmap.getWidth() + Math.round(x * pixmap.getWidth())) * pixmap.getNumberOfComponents();
+    const pixels = pixmap.getPixels();
+    return [pixels[offset]!, pixels[offset + 1]!, pixels[offset + 2]!];
+  };
+
+  it("lists images with their positions", async () => {
+    const engine = await engineWith(imagePdf());
+    const images = await engine.listPageImages(0);
+    expect(images).toHaveLength(2);
+    expect(images[0]!.x).toBeCloseTo(100 / 600, 3);
+    expect(images[0]!.y).toBeCloseTo((800 - 530) / 800, 3);
+  });
+
+  it("removes just the chosen image and keeps what is behind it", async () => {
+    const engine = await engineWith(imagePdf());
+    const [first] = await engine.listPageImages(0);
+    const result = await engine.exportDocument(
+      request({ overlays: [{ id: "e", page: 0, kind: "redact", x: first!.x, y: first!.y, width: first!.width, height: first!.height, color: "#ffffff", mode: "eraseImage" }] }),
+    );
+    // The blue panel shows where the image was, instead of a white hole.
+    expect(colourAt(result.bytes, (first!.x + first!.width / 2), first!.y + first!.height / 2)).toEqual([0, 0, 255]);
+    // The second copy of the same image is still drawn.
+    expect(colourAt(result.bytes, 425 / 600, (800 - 125) / 800)).toEqual([0, 0, 0]);
+  });
+});
