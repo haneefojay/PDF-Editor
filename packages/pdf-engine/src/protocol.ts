@@ -127,13 +127,27 @@ export type AppendOperation =
   | { type: "blank"; width: number; height: number }
   | { type: "images"; images: ArrayBuffer[] }
   | { type: "copy"; source: number }
+  /** Copies of pages fitted (scaled and centred) to a new display size in points. */
+  | { type: "resize"; sources: number[]; width: number; height: number }
   | { type: "pdf"; bytes: ArrayBuffer; password?: string };
+
+/** How normalized positions on a source page map onto its resized copy. */
+export type PageMapping = {
+  source: number;
+  target: number;
+  scale: number;
+  scaleX: number;
+  scaleY: number;
+  offsetX: number;
+  offsetY: number;
+};
 
 export type AppendResult = DocumentInfo & {
   /** The new source document; the appended pages follow the old ones. */
   bytes: Uint8Array;
   firstIndex: number;
   count: number;
+  mappings?: PageMapping[];
 };
 
 /** Error messages start with one of these codes so the UI can react. */

@@ -45,6 +45,7 @@ export function inspectPdf(bytes: Buffer, password?: string) {
       annotations: page.getAnnotations().map((annotation) => annotation.getType()),
       widgets: page.getWidgets().length,
       rotate: page.getObject().getInheritable("Rotate").valueOf(),
+      size: [page.getBounds()[2] - page.getBounds()[0], page.getBounds()[3] - page.getBounds()[1]].map((value) => Math.round(value)),
     };
     page.destroy();
     return info;
@@ -127,4 +128,19 @@ export function colourAt(bytes: Buffer, x: number, y: number, page = 0) {
   const rgb = [pixels[offset]!, pixels[offset + 1]!, pixels[offset + 2]!];
   doc.destroy();
   return rgb;
+}
+
+/** Files in a ZIP archive written without compression. */
+export function readStoredZip(bytes: Buffer) {
+  const files: { name: string; data: Buffer }[] = [];
+  let at = 0;
+  while (bytes.readUInt32LE(at) === 0x04034b50) {
+    const size = bytes.readUInt32LE(at + 18);
+    const nameLength = bytes.readUInt16LE(at + 26);
+    const extra = bytes.readUInt16LE(at + 28);
+    const start = at + 30 + nameLength + extra;
+    files.push({ name: bytes.subarray(at + 30, at + 30 + nameLength).toString("utf8"), data: bytes.subarray(start, start + size) });
+    at = start + size;
+  }
+  return files;
 }

@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
-import { colourAt, imageOnPanelPdf, inspectPdf, longPdf, PARAGRAPH_LINES, paragraphPdf, pngImage, samplePdf } from "./fixtures";
+import { readFile } from "node:fs/promises";
+import { colourAt, imageOnPanelPdf, inspectPdf, longPdf, PARAGRAPH_LINES, paragraphPdf, pngImage, readStoredZip, samplePdf } from "./fixtures";
 import { clickOnPage, dragOnPage, exportPdf, fitPage, openSample, pageAt, tab, tool } from "./helpers";
 
 test("edits original text without disturbing the table around it", async ({ page }) => {
@@ -265,4 +266,51 @@ test("draws with the highlighter and erases pen strokes", async ({ page }) => {
   const bytes = await exportPdf(page);
   const pdf = inspectPdf(bytes);
   expect(pdf.pages[0]!.annotations).toEqual(["Ink", "Ink"]);
+});
+
+test("changes the page size with edits kept, then splits into a ZIP", async ({ page }) => {
+  await openSample(page);
+  await fitPage(page);
+  await tool(page, "Add text");
+  await clickOnPage(page, [0.6, 0.2]);
+  await page.keyboard.type("Moves with the page");
+  await clickOnPage(page, [0.3, 0.9]);
+
+  await tab(page, "Pages");
+  await tool(page, "Page size");
+  const sizeDialog = page.getByRole("dialog", { name: "Page size" });
+  await expect(sizeDialog).toContainText("Page 1 is 216 × 279 mm (Letter)");
+  await sizeDialog.getByRole("combobox", { name: /^Pages/ }).selectOption("all");
+  await sizeDialog.getByRole("combobox", { name: /^Paper size/ }).selectOption("A5");
+  await sizeDialog.getByRole("button", { name: "Resize 3 pages" }).click();
+  await expect(sizeDialog).toBeHidden();
+  await expect(page.locator(".textOverlay", { hasText: "Moves with the page" })).toBeVisible();
+
+  const resized = inspectPdf(await exportPdf(page));
+  // Portrait pages become A5 portrait; the sideways third page stays landscape.
+  expect(resized.pages.map((item) => item.size)).toEqual([[420, 595], [420, 595], [595, 420]]);
+  expect(resized.pages[0]!.text).toContain("Quarterly Report");
+  expect(resized.pages[0]!.text).toContain("Moves with the page");
+
+  await tool(page, "Split");
+  const splitDialog = page.getByRole("dialog", { name: "Split document" });
+  await splitDialog.getByRole("radio", { name: "Page ranges" }).click();
+  await splitDialog.getByLabel("Ranges, one file each").fill("1-2, 9");
+  await expect(splitDialog).toContainText('"9" is outside pages 1–3.');
+  await splitDialog.getByLabel("Ranges, one file each").fill("1-2, 3");
+  await expect(splitDialog).toContainText("2 files: pages 1-2, 3");
+  const download = page.waitForEvent("download");
+  await splitDialog.getByRole("button", { name: "Save 2 files" }).click();
+  const file = await download;
+  expect(file.suggestedFilename()).toBe("sample-split.zip");
+  const parts = readStoredZip(await readFile((await file.path())!));
+  expect(parts.map((part) => part.name)).toEqual(["sample-p1-2.pdf", "sample-p3.pdf"]);
+  const first = inspectPdf(parts[0]!.data);
+  expect(first.pages).toHaveLength(2);
+  expect(first.pages[0]!.size).toEqual([420, 595]);
+  expect(first.pages[0]!.text).toContain("Moves with the page");
+  expect(inspectPdf(parts[1]!.data).pages[0]!.text).toContain("Page three");
+
+  await page.getByRole("button", { name: "Undo" }).click();
+  expect(inspectPdf(await exportPdf(page)).pages.map((item) => item.size)).toEqual([[612, 792], [612, 792], [792, 612]]);
 });

@@ -1342,7 +1342,7 @@ details.more > div label {
   background: var(--raised);
   color: var(--text);
 }
-.modalBody button:not(.choiceList button) {
+.modalBody button:not(.choiceList button, .segmented button) {
   padding: 8px 12px;
   border: 1px solid var(--line-strong);
   border-radius: 8px;
@@ -1352,7 +1352,7 @@ details.more > div label {
   justify-content: center;
   gap: 6px;
 }
-.modalBody button:hover:not(:disabled) {
+.modalBody button:hover:not(:disabled, .segmented button) {
   background: var(--hover);
 }
 .modalBody button:disabled {
@@ -2185,4 +2185,16 @@ details.more > div label {
 }
 .page.tool-eraser {
   cursor: none;
+}
+
+.splitSummary {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+.modal .segmented + .fieldGrid {
+  margin-top: 12px;
+}
+.modal .segmented button {
+  min-height: 34px;
 }

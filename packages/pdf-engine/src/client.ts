@@ -11,6 +11,7 @@ export type {
   ExportResult,
   FormField,
   OutlineEntry,
+  PageMapping,
   PageLink,
   PageImage,
   PageInfo,
