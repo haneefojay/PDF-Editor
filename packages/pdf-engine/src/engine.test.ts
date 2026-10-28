@@ -406,3 +406,42 @@ describe("conversion helpers", () => {
     expect([...png.slice(1, 4)].map((c) => String.fromCharCode(c)).join("")).toBe("PNG");
   });
 });
+
+describe("navigation", () => {
+  function linkedPdf() {
+    const doc = new mupdf.PDFDocument();
+    for (let index = 0; index < 3; index += 1) doc.insertPage(-1, doc.addPage([0, 0, 600, 800], 0, doc.newDictionary(), ""));
+    const first = doc.loadPage(0);
+    first.createLink([50, 50, 150, 70], doc.formatLinkURI({ type: "XYZ", chapter: 0, page: 2, x: 0, y: 400, width: 0, height: 0, zoom: 0 }));
+    first.createLink([50, 100, 150, 120], "https://example.com/report");
+    first.createLink([50, 150, 150, 170], "javascript:alert(1)");
+    const outline = doc.outlineIterator();
+    outline.insert({ title: "Introduction", uri: doc.formatLinkURI({ type: "Fit", chapter: 0, page: 0, x: 0, y: 0, width: 0, height: 0, zoom: 0 }), open: true });
+    outline.insert({ title: "Results", uri: doc.formatLinkURI({ type: "Fit", chapter: 0, page: 2, x: 0, y: 0, width: 0, height: 0, zoom: 0 }), open: true });
+    outline.destroy();
+    const bytes = doc.saveToBuffer("").asUint8Array();
+    doc.destroy();
+    return new Uint8Array(bytes).buffer;
+  }
+
+  it("reads the outline with target pages", async () => {
+    const engine = await engineWith(linkedPdf());
+    const outline = await engine.getOutline();
+    expect(outline.map((entry) => [entry.title, entry.page, entry.depth])).toEqual([
+      ["Introduction", 0, 0],
+      ["Results", 2, 0],
+    ]);
+  });
+
+  it("lists internal and safe external links", async () => {
+    const engine = await engineWith(linkedPdf());
+    const links = await engine.getLinks(0);
+    expect(links).toHaveLength(2);
+    const internal = links.find((link) => link.page !== undefined)!;
+    expect(internal.page).toBe(2);
+    expect(internal.x).toBeCloseTo(50 / 600, 3);
+    expect(internal.y).toBeCloseTo(50 / 800, 3);
+    expect(links.find((link) => link.uri)?.uri).toBe("https://example.com/report");
+    expect(await engine.getLinks(1)).toEqual([]);
+  });
+});

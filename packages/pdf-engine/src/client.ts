@@ -10,6 +10,8 @@ export type {
   DocumentInfo,
   ExportResult,
   FormField,
+  OutlineEntry,
+  PageLink,
   PageImage,
   PageInfo,
   PdfMetadata,

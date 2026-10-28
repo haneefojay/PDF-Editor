@@ -7,6 +7,7 @@ import {
   useState,
   type ChangeEvent,
   type DragEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
   type TouchEvent as ReactTouchEvent,
 } from "react";
@@ -19,6 +20,7 @@ import {
   ArrowUp,
   ArrowUpRight,
   Bold,
+  BookOpen,
   BringToFront,
   ChevronLeft,
   ChevronRight,
@@ -43,6 +45,7 @@ import {
   ListChecks,
   Lock,
   Maximize,
+  Moon,
   Merge,
   MessageSquareText,
   MousePointer2,
@@ -67,6 +70,7 @@ import {
   Type,
   Underline,
   Undo2,
+  Wrench,
   X,
   ZoomIn,
   ZoomOut,
@@ -77,6 +81,8 @@ import {
   PASSWORD_REQUIRED,
   type AppendOperation,
   type FormField,
+  type OutlineEntry,
+  type PageLink,
   type PageImage,
   type PageInfo,
   type PdfMetadata,
@@ -96,9 +102,11 @@ import { MAX_ZOOM, MIN_ZOOM, useEditor } from "./store";
 import { configureNativeUi, isNativePlatform, registerBackHandler, savePdf } from "./platform";
 import { createOcrRecognizer, ocrLanguages, type OcrLanguage, type ScanEnhancement } from "./ocr";
 import { signPdfWithCertificate } from "./digital-signature";
+import { DocumentView, type DocumentViewHandle } from "./DocumentView";
 import { PageCanvas, type CanvasSettings, type MarkupKind, type OriginalEdit, type ShapeKind } from "./PageCanvas";
 import { exportFontName, fitTextBox, fontCategory, layoutStyled, topForBaseline, usePreviewFonts } from "./textMetrics";
 import { Modal, NumberField, Toast } from "./ui";
+import { useMediaQuery } from "./hooks";
 import { dataUrlToBlob, downloadBlob, readAsDataUrl } from "./files";
 import { boundsOf } from "./geometry";
 import { layoutOverlays } from "./layout";
@@ -218,7 +226,6 @@ export function App() {
   const [confidenceThreshold, setConfidenceThreshold] = useState(75);
   const [metadataDraft, setMetadataDraft] = useState<PdfMetadata>({ title: "", author: "", subject: "", keywords: "" });
   const [recent, setRecent] = useState<ProjectSummary[]>([]);
-  const [image, setImage] = useState<{ source: number; url: string } | null>(null);
   const [thumbs, setThumbs] = useState<Map<number, string>>(new Map());
   const [busy, setBusy] = useState("");
   const [saving, setSaving] = useState(false);
@@ -271,7 +278,25 @@ export function App() {
   const [signatureContact, setSignatureContact] = useState("");
   const [security, setSecurity] = useState({ userPassword: "", ownerPassword: "", allowPrint: true, allowCopy: true, allowEdit: false, allowAnnotate: true, sanitizeMetadata: false, flattenForms: false });
   const [lastAudit, setLastAudit] = useState<{ generatedAt: string; document: string; pages: number[]; areas: number; verified: boolean } | null>(null);
-  const [textLines, setTextLines] = useState<PositionedTextLine[]>([]);
+  // Text runs and links per source page, fetched as pages come into view.
+  const [pageData, setPageData] = useState<Map<number, { lines: PositionedTextLine[]; links: PageLink[] }>>(new Map());
+  const [outline, setOutline] = useState<OutlineEntry[]>([]);
+  const [railTab, setRailTab] = useState<"pages" | "outline">("pages");
+  const [readingTheme, setReadingTheme] = useState<"day" | "night" | "sepia">(() => {
+    try {
+      const saved = localStorage.getItem("paperless:reading-theme");
+      return saved === "night" || saved === "sepia" ? saved : "day";
+    } catch {
+      return "day";
+    }
+  });
+  const isPhone = useMediaQuery("(max-width: 760px)");
+  const [trayOpen, setTrayOpen] = useState(false);
+  const [immersive, setImmersive] = useState(false);
+  // The phone page indicator shows while scrolling, then fades away.
+  const [pillShown, setPillShown] = useState(true);
+  const viewRef = useRef<DocumentViewHandle>(null);
+  const [stageElement, setStageElement] = useState<HTMLDivElement | null>(null);
   const [originalEdit, setOriginalEdit] = useState<OriginalEdit | null>(null);
   const { tool, zoom, page, doc, undo, redo, setTool, setZoom, setPage, execute, undoOnce, redoOnce, reset, hydrate } = useEditor();
 
@@ -330,7 +355,8 @@ export function App() {
   const resetView = () => {
     thumbQueue.current.generation += 1;
     thumbQueue.current.pending.clear();
-    setTextLines([]);
+    setPageData(new Map());
+    setOutline([]);
     setSelectedId(null);
     setEditingId(null);
     setOriginalEdit(null);
@@ -339,10 +365,6 @@ export function App() {
     setThumbs((current) => {
       current.forEach((url) => URL.revokeObjectURL(url));
       return new Map();
-    });
-    setImage((current) => {
-      if (current) URL.revokeObjectURL(current.url);
-      return null;
     });
   };
 
@@ -460,7 +482,6 @@ export function App() {
 
   const sourcePage = doc.pageOrder[page] ?? 0;
   const pageInfo = open?.pages[sourcePage];
-  const rotation = doc.rotations[sourcePage] ?? 0;
   const [renderScale, setRenderScale] = useState(1.5);
 
   // Keep the render resolution in step with zoom so pages stay sharp.
@@ -472,46 +493,60 @@ export function App() {
 
   const openBytesRef = open?.bytes;
   const openPassword = open?.password;
-  useEffect(() => {
-    if (!openBytesRef || !doc.pageOrder.length) return;
-    let active = true;
-    setImage((current) => (current && current.source !== sourcePage ? null : current));
-    const render = async () => {
+  const renderForView = useCallback(
+    async (source: number, scale: number) => {
       try {
         await withTimeout(engine.current!.ready, 20_000, "The PDF renderer did not start.");
-        return await withTimeout(api().renderPage(sourcePage, renderScale), 30_000, "This page took too long to render.");
+        return await withTimeout(api().renderPage(source, scale), 30_000, "This page took too long to render.");
       } catch {
         await restartEngine(openBytesRef, openPassword);
-        return withTimeout(api().renderPage(sourcePage, renderScale), 30_000, "This page could not be rendered.");
+        return withTimeout(api().renderPage(source, scale), 30_000, "This page could not be rendered.");
       }
-    };
-    void render()
-      .then((png) => {
-        if (!active) return;
-        const url = pngUrl(png);
-        setImage((current) => {
-          if (current) URL.revokeObjectURL(current.url);
-          return { source: sourcePage, url };
-        });
-      })
-      .catch((cause) => active && fail(cause, "Page render failed"));
-    return () => {
-      active = false;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [openBytesRef, openPassword, sourcePage, doc.pageOrder.length, renderScale]);
+    },
+     
+    [openBytesRef, openPassword, restartEngine],
+  );
 
+  // A changed source document invalidates cached text and links.
+  const pageDataLoading = useRef(new Set<number>());
+  const currentBytes = useRef<ArrayBuffer | undefined>(undefined);
+  currentBytes.current = openBytesRef;
   useEffect(() => {
+    pageDataLoading.current.clear();
+    setPageData(new Map());
     if (!openBytesRef) return;
     let active = true;
-    setTextLines([]);
-    void withTimeout(api().extractTextLines(sourcePage), 20_000, "Reading page text took too long.")
-      .then((lines) => active && setTextLines(lines))
-      .catch(() => undefined);
+    void api()
+      .getOutline()
+      .then((entries) => active && setOutline(entries))
+      .catch(() => active && setOutline([]));
     return () => {
       active = false;
     };
-  }, [openBytesRef, sourcePage]);
+  }, [openBytesRef]);
+  const loadPageData = useCallback(
+    (sources: number[]) => {
+      const bytes = openBytesRef;
+      for (const source of sources) {
+        if (pageDataLoading.current.has(source)) continue;
+        pageDataLoading.current.add(source);
+        void Promise.all([
+          withTimeout(api().extractTextLines(source), 20_000, "Reading page text took too long."),
+          api().getLinks(source).catch(() => [] as PageLink[]),
+        ])
+          .then(([lines, links]) => {
+            if (bytes !== currentBytes.current) return;
+            setPageData((current) => new Map(current).set(source, { lines, links }));
+          })
+          .catch(() => pageDataLoading.current.delete(source));
+      }
+    },
+    [openBytesRef],
+  );
+  useEffect(() => {
+    if (openBytesRef && doc.pageOrder.length) loadPageData([sourcePage]);
+  }, [openBytesRef, sourcePage, doc.pageOrder.length, loadPageData]);
+  const textLines = pageData.get(sourcePage)?.lines ?? [];
 
   const requestThumb = useCallback(
     (source: number) => {
@@ -564,15 +599,29 @@ export function App() {
     if (page >= doc.pageOrder.length && doc.pageOrder.length > 0) setPage(doc.pageOrder.length - 1);
   }, [doc.pageOrder.length, page, setPage]);
 
-  // Fit-to-width / fit-to-page follows window size, page and rotation changes.
+  // Fit uses the document's most common page size, so scrolling past an odd
+  // landscape page doesn't make the zoom jump.
+  const typicalPage = useMemo(() => {
+    const counts = new Map<string, { width: number; height: number; count: number }>();
+    for (const source of doc.pageOrder) {
+      const info = open?.pages[source];
+      if (!info) continue;
+      const sideways = (((doc.rotations[source] ?? 0) % 360) + 360) % 180 !== 0;
+      const width = Math.round(sideways ? info.height : info.width);
+      const height = Math.round(sideways ? info.width : info.height);
+      const key = `${width}x${height}`;
+      const entry = counts.get(key) ?? { width, height, count: 0 };
+      entry.count += 1;
+      counts.set(key, entry);
+    }
+    return [...counts.values()].sort((a, b) => b.count - a.count)[0] ?? null;
+  }, [doc.pageOrder, doc.rotations, open?.pages]);
   useLayoutEffect(() => {
-    if (!fit || !pageInfo || !stageRef.current) return;
+    if (!fit || !typicalPage || !stageRef.current) return;
     const apply = () => {
       const stage = stageRef.current;
       if (!stage) return;
-      const sideways = rotation % 180 !== 0;
-      const width = sideways ? pageInfo.height : pageInfo.width;
-      const height = sideways ? pageInfo.width : pageInfo.height;
+      const { width, height } = typicalPage;
       const margin = window.innerWidth < 760 ? 16 : 48;
       const byWidth = (stage.clientWidth - margin) / width;
       const next = fit === "width" ? Math.min(byWidth, 1.5) : Math.min(byWidth, (stage.clientHeight - margin) / height);
@@ -582,7 +631,7 @@ export function App() {
     const observer = new ResizeObserver(apply);
     observer.observe(stageRef.current);
     return () => observer.disconnect();
-  }, [fit, pageInfo, rotation, setZoom, showRail, showComments]);
+  }, [fit, typicalPage, setZoom, showRail, showComments]);
 
   const zoomTo = useCallback(
     (next: number) => {
@@ -591,6 +640,32 @@ export function App() {
     },
     [setZoom],
   );
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("paperless:reading-theme", readingTheme);
+    } catch {
+      // Private browsing: the theme just isn't remembered.
+    }
+  }, [readingTheme]);
+  useEffect(() => {
+    if (!isPhone || !stageElement) return;
+    let timer = window.setTimeout(() => setPillShown(false), 1800);
+    const show = () => {
+      setPillShown(true);
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => setPillShown(false), 1500);
+    };
+    stageElement.addEventListener("scroll", show, { passive: true });
+    return () => {
+      window.clearTimeout(timer);
+      stageElement.removeEventListener("scroll", show);
+    };
+  }, [isPhone, stageElement]);
+  // Tools need the chrome; reading full screen is only for browsing.
+  useEffect(() => {
+    if (tool !== "select" || trayOpen) setImmersive(false);
+  }, [tool, trayOpen]);
 
   const closeDocument = useCallback(() => {
     resetView();
@@ -637,10 +712,14 @@ export function App() {
 
   const generated = useMemo(() => layoutOverlays(doc.layout, doc.pageOrder, open?.pages ?? []), [doc.layout, doc.pageOrder, open?.pages]);
   const current = useMemo(() => doc.overlays.filter((item) => item.page === sourcePage), [doc.overlays, sourcePage]);
-  const shownOverlays = useMemo(() => {
-    const layout = generated.filter((item) => item.page === sourcePage);
-    return [...layout.filter((item) => item.kind === "background"), ...current, ...layout.filter((item) => item.kind !== "background")];
-  }, [generated, current, sourcePage]);
+  const overlaysByPage = useMemo(() => {
+    const byPage = new Map<number, Overlay[]>();
+    const push = (overlay: Overlay) => byPage.set(overlay.page, [...(byPage.get(overlay.page) ?? []), overlay]);
+    generated.filter((item) => item.kind === "background").forEach(push);
+    doc.overlays.forEach(push);
+    generated.filter((item) => item.kind !== "background").forEach(push);
+    return byPage;
+  }, [generated, doc.overlays]);
   const selected = current.find((item) => item.id === selectedId) ?? null;
 
   const edited =
@@ -1231,7 +1310,10 @@ export function App() {
   };
   const showResult = (result: FindResult) => {
     const index = doc.pageOrder.indexOf(result.sourcePage);
-    if (index >= 0) setPage(index);
+    if (index >= 0) {
+      viewRef.current?.scrollToPage(index, result.line.y);
+      setPage(index);
+    }
     setTool("select");
     setSearchHighlight({ sourcePage: result.sourcePage, rect: { x: result.line.x, y: result.line.y, width: result.line.width, height: result.line.height } });
   };
@@ -1347,34 +1429,8 @@ export function App() {
   useEffect(() => {
     const stage = stageRef.current;
     if (!stage) return;
-    let overscroll = 0;
-    let overscrollTimer = 0;
-    // Momentum scrolling must not skip several pages after a flip.
-    let flippedAt = 0;
     const wheel = (event: WheelEvent) => {
-      if (!event.ctrlKey && !event.metaKey) {
-        // Keep scrolling past the end of a page to reach the next one.
-        const { page: currentPage, doc: currentDoc, setPage: goTo } = useEditor.getState();
-        const atBottom = stage.scrollTop + stage.clientHeight >= stage.scrollHeight - 2;
-        const atTop = stage.scrollTop <= 0;
-        if (performance.now() - flippedAt < 600) return;
-        if ((event.deltaY > 0 && atBottom && currentPage < currentDoc.pageOrder.length - 1) || (event.deltaY < 0 && atTop && currentPage > 0)) {
-          if (Math.sign(overscroll) !== Math.sign(event.deltaY)) overscroll = 0;
-          overscroll += event.deltaY;
-          window.clearTimeout(overscrollTimer);
-          overscrollTimer = window.setTimeout(() => (overscroll = 0), 400);
-          if (Math.abs(overscroll) > 220) {
-            const forward = overscroll > 0;
-            overscroll = 0;
-            flippedAt = performance.now();
-            goTo(currentPage + (forward ? 1 : -1));
-            requestAnimationFrame(() => {
-              stage.scrollTop = forward ? 0 : stage.scrollHeight;
-            });
-          }
-        } else overscroll = 0;
-        return;
-      }
+      if (!event.ctrlKey && !event.metaKey) return;
       event.preventDefault();
       const current = useEditor.getState().zoom;
       const next = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, current * Math.exp(-event.deltaY * 0.0025)));
@@ -1391,7 +1447,90 @@ export function App() {
     };
     stage.addEventListener("wheel", wheel, { passive: false });
     return () => stage.removeEventListener("wheel", wheel);
-  }, [open, zoomTo]);
+  }, [open, zoomTo, stageElement]);
+
+  const goTo = (source: number, top = 0) => {
+    const index = doc.pageOrder.indexOf(source);
+    if (index < 0) {
+      setNotice("That page is not part of the document any more.");
+      return;
+    }
+    viewRef.current?.scrollToPage(index, top, "smooth");
+    setPage(index);
+  };
+  const followLink = (link: PageLink) => {
+    if (link.page !== undefined) goTo(link.page, link.top ?? 0);
+    else if (link.uri && window.confirm(`Open this link?\n\n${link.uri}`)) window.open(link.uri, "_blank", "noopener,noreferrer");
+  };
+  /** Interacting with a page that isn't current makes it current without scrolling. */
+  const activatePage = (index: number) => {
+    if (index === page) return;
+    viewRef.current?.markCurrent(index);
+    setPage(index);
+  };
+  const fitWidthZoom = () => {
+    const stage = stageRef.current;
+    if (!stage || !typicalPage) return zoom;
+    const width = typicalPage.width;
+    return Math.max(MIN_ZOOM, Math.min(1.5, (stage.clientWidth - (window.innerWidth < 760 ? 16 : 48)) / width));
+  };
+  const zoomAround = (next: number, clientX: number, clientY: number) => {
+    const stage = stageRef.current;
+    if (!stage) return;
+    const clamped = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, next));
+    const rect = stage.getBoundingClientRect();
+    const offsetX = clientX - rect.left;
+    const offsetY = clientY - rect.top;
+    const contentX = stage.scrollLeft + offsetX;
+    const contentY = stage.scrollTop + offsetY;
+    const ratio = clamped / zoom;
+    zoomTo(clamped);
+    requestAnimationFrame(() => {
+      stage.scrollLeft = contentX * ratio - offsetX;
+      stage.scrollTop = contentY * ratio - offsetY;
+    });
+  };
+  // Taps on the page: one toggles full-screen reading on phones, two zoom.
+  const tap = useRef({ x: 0, y: 0, at: 0, blocked: false, lastAt: 0, lastX: 0, lastY: 0, timer: 0 });
+  const stagePointerDown = (event: ReactPointerEvent) => {
+    const target = event.target as HTMLElement;
+    tap.current.blocked =
+      !event.isPrimary ||
+      tool !== "select" ||
+      Boolean(selectedId || originalEdit || editingId) ||
+      Boolean(target.closest(".objectBox, .originalTextHit, .linkHit, .inlineEditor, button, input, textarea, select"));
+    tap.current.x = event.clientX;
+    tap.current.y = event.clientY;
+    tap.current.at = performance.now();
+  };
+  const stagePointerUp = (event: ReactPointerEvent) => {
+    const state = tap.current;
+    if (state.blocked || pinch.current || performance.now() - state.at > 350 || Math.hypot(event.clientX - state.x, event.clientY - state.y) > 12) return;
+    const now = performance.now();
+    if (event.pointerType === "touch" && now - state.lastAt < 320 && Math.hypot(event.clientX - state.lastX, event.clientY - state.lastY) < 40) {
+      window.clearTimeout(state.timer);
+      state.lastAt = 0;
+      const fitted = fitWidthZoom();
+      if (zoom > fitted * 1.3) setFit("width");
+      else zoomAround(fitted * 2.2, event.clientX, event.clientY);
+      return;
+    }
+    state.lastAt = now;
+    state.lastX = event.clientX;
+    state.lastY = event.clientY;
+    window.clearTimeout(state.timer);
+    if (isPhone) state.timer = window.setTimeout(() => setImmersive((value) => !value), 330);
+  };
+  const choosePhoneTab = (id: TabId) => {
+    if (trayOpen && tab === id) {
+      setTrayOpen(false);
+      chooseTool("select");
+      return;
+    }
+    setTab(id);
+    setTrayOpen(true);
+    if (!tabs.find((item) => item.id === id)?.items.some((entry) => entry.tool === tool)) chooseTool("select");
+  };
 
   const chooseTool = (next: Tool) => {
     if (originalEdit) commitOriginalEdit(originalEdit, false);
@@ -1620,14 +1759,14 @@ export function App() {
   const reviewOverlays = doc.overlays.filter(isReviewOverlay);
   const filteredReviews = reviewOverlays.filter((overlay) => commentFilter === "all" || (commentFilter === "resolved" ? overlay.resolved : !overlay.resolved));
   const fontOptions = Array.from(new Set([...textLines.map((line) => line.fontName), ...current.filter((item): item is TextOverlay => item.kind === "text").map((item) => item.fontName || item.fontFamily), ...commonFonts].filter(Boolean)));
-  const busyPage = !image || image.source !== sourcePage;
 
   type Item = { key: string; label: string; Icon: typeof MousePointer2; tool?: Tool; action?: () => void; active?: boolean; title?: string; disabled?: boolean };
   const toolItem = (id: Tool, label: string, Icon: typeof MousePointer2, title?: string): Item => ({ key: id, label, Icon, tool: id, title: `${title ?? label}${shortcutFor(id) ? ` (${shortcutFor(id)})` : ""}` });
-  const tabs: { id: TabId; label: string; items: Item[] }[] = [
+  const tabs: { id: TabId; label: string; Icon: typeof MousePointer2; items: Item[] }[] = [
     {
       id: "edit",
       label: "Edit",
+      Icon: Pencil,
       items: [
         toolItem("select", "Select", MousePointer2, "Select, move and edit — click existing text to change it"),
         toolItem("text", "Add text", Type),
@@ -1642,6 +1781,7 @@ export function App() {
     {
       id: "comment",
       label: "Comment",
+      Icon: MessageSquareText,
       items: [
         toolItem("markup", "Highlight", Highlighter, "Highlight, underline or strike text"),
         toolItem("note", "Note", MessageSquareText, "Sticky note or callout"),
@@ -1654,6 +1794,7 @@ export function App() {
     {
       id: "sign",
       label: "Fill & Sign",
+      Icon: Signature,
       items: [
         toolItem("signature", "Sign", Signature, "Draw, type or place a signature"),
         toolItem("form", "Add field", FileKey2, "Draw a new form field"),
@@ -1664,6 +1805,7 @@ export function App() {
     {
       id: "pages",
       label: "Pages",
+      Icon: Layers,
       items: [
         { key: "organize", label: "Organize", Icon: Layers, action: () => { setSelectedPages([page]); setDialog("pages"); }, title: "Reorder, rotate, delete and extract pages" },
         { key: "rotateLeft", label: "Rotate left", Icon: RotateCcw, action: () => rotatePages([sourcePage], -90) },
@@ -1683,8 +1825,17 @@ export function App() {
     {
       id: "tools",
       label: "Tools",
+      Icon: Wrench,
       items: [
         { key: "find", label: "Find & replace", Icon: Search, action: () => setDialog("find") },
+        {
+          key: "theme",
+          label: readingTheme === "day" ? "Night mode" : readingTheme === "night" ? "Sepia" : "Day mode",
+          Icon: Moon,
+          action: () => setReadingTheme(readingTheme === "day" ? "night" : readingTheme === "night" ? "sepia" : "day"),
+          title: "Change how pages look while reading (not the exported file)",
+          active: readingTheme !== "day",
+        },
         { key: "print", label: "Print", Icon: Printer, action: () => void printDocument(), title: "Print with all edits (Ctrl+P)" },
         { key: "text", label: "Export text", Icon: FileText, action: () => void exportText(), title: "Save all text as a .txt file" },
         { key: "ocr", label: "OCR scan", Icon: ScanText, action: () => { setOcrProgress(""); setDialog("ocr"); }, title: "Recognise text in scanned pages" },
@@ -2045,6 +2196,26 @@ export function App() {
   })();
 
   const contextContent = selectionOptions ?? toolOptions;
+  const ribbonBar = (
+<div className="ribbon" role="toolbar" aria-label={`${activeTab.label} tools`}>
+        {activeTab.items.map((item) => {
+          const active = item.tool ? tool === item.tool : item.active;
+          return (
+            <button
+              key={item.key}
+              className={active ? "chosen" : ""}
+              aria-pressed={item.tool ? active : undefined}
+              title={item.title ?? item.label}
+              disabled={item.disabled}
+              onClick={() => (item.tool ? chooseTool(item.tool) : item.action?.())}
+            >
+              <item.Icon />
+              <span>{item.label}</span>
+            </button>
+          );
+        })}
+      </div>
+  );
   const hiddenInputs = (
     <>
       <input ref={inputs.image} hidden type="file" accept="image/png,image/jpeg" onChange={pickFile(addImage)} />
@@ -2072,7 +2243,7 @@ export function App() {
   );
 
   return (
-    <div className="app" onDragOver={(event) => event.preventDefault()} onDrop={drop}>
+    <div className={`app ${isPhone ? "phone" : ""} ${immersive ? "immersive" : ""}`} onDragOver={(event) => event.preventDefault()} onDrop={drop}>
       <header className="top">
         <div className="file">
           <button className="iconButton" aria-label="Close document" title="Close document" onClick={closeDocument}>
@@ -2085,7 +2256,7 @@ export function App() {
             </small>
           </div>
         </div>
-        <nav className="tabs" aria-label="Tool groups" role="tablist">
+        {!isPhone && <nav className="tabs" aria-label="Tool groups" role="tablist">
           {tabs.map((item) => (
             <button
               key={item.id}
@@ -2100,8 +2271,13 @@ export function App() {
               {item.label}
             </button>
           ))}
-        </nav>
+        </nav>}
         <div className="topActions">
+          {isPhone && (
+            <button className="iconButton" aria-label={showRail ? "Hide pages" : "Show pages"} aria-pressed={showRail} onClick={() => setShowRail((value) => !value)}>
+              <PanelLeft />
+            </button>
+          )}
           <button className="iconButton" aria-label="Undo" title="Undo (Ctrl+Z)" disabled={!undo.length} onClick={undoOnce}>
             <Undo2 />
           </button>
@@ -2116,35 +2292,51 @@ export function App() {
           </button>
         </div>
       </header>
-      <div className="ribbon" role="toolbar" aria-label={`${activeTab.label} tools`}>
-        {activeTab.items.map((item) => {
-          const active = item.tool ? tool === item.tool : item.active;
-          return (
-            <button
-              key={item.key}
-              className={active ? "chosen" : ""}
-              aria-pressed={item.tool ? active : undefined}
-              title={item.title ?? item.label}
-              disabled={item.disabled}
-              onClick={() => (item.tool ? chooseTool(item.tool) : item.action?.())}
-            >
-              <item.Icon />
-              <span>{item.label}</span>
-            </button>
-          );
-        })}
-      </div>
-      {contextContent && <div className="contextBar">{contextContent}</div>}
+      {!isPhone && ribbonBar}
+      {!isPhone && contextContent && <div className="contextBar">{contextContent}</div>}
       <div className={`work ${showRail ? "withRail" : ""} ${showComments ? "withComments" : ""}`}>
         {showRail && (
-          <aside className="rail" aria-label="Pages">
+          <aside className="rail" aria-label="Pages and outline">
             <div className="railTitle">
-              <b>Pages</b>
+              <div className="segmented" role="tablist">
+                <button role="tab" aria-selected={railTab === "pages"} className={railTab === "pages" ? "active" : ""} onClick={() => setRailTab("pages")}>
+                  Thumbnails
+                </button>
+                <button role="tab" aria-selected={railTab === "outline"} className={railTab === "outline" ? "active" : ""} onClick={() => setRailTab("outline")}>
+                  Outline
+                </button>
+              </div>
               <button className="iconButton" aria-label="Hide pages" onClick={() => setShowRail(false)}>
                 <X />
               </button>
             </div>
-            {doc.pageOrder.map((source, index) => (
+            {railTab === "outline" && (
+              <nav className="outline" aria-label="Document outline">
+                {outline.length ? (
+                  outline.map((entry, index) => (
+                    <button
+                      key={index}
+                      className="outlineEntry"
+                      style={{ paddingLeft: 8 + entry.depth * 14 }}
+                      disabled={entry.page === null && !entry.uri}
+                      onClick={() => {
+                        if (entry.page !== null) goTo(entry.page);
+                        else if (entry.uri) followLink({ x: 0, y: 0, width: 0, height: 0, uri: entry.uri });
+                        if (isPhone) setShowRail(false);
+                      }}
+                    >
+                      <span>{entry.title}</span>
+                      {entry.page !== null && <small>{doc.pageOrder.indexOf(entry.page) + 1 || "–"}</small>}
+                    </button>
+                  ))
+                ) : (
+                  <p className="empty">
+                    <BookOpen /> This document has no outline.
+                  </p>
+                )}
+              </nav>
+            )}
+            {railTab === "pages" && doc.pageOrder.map((source, index) => (
               <div
                 key={source}
                 role="button"
@@ -2195,56 +2387,98 @@ export function App() {
           </aside>
         )}
         <main className="canvasArea">
-          <div ref={stageRef} className="stage" onTouchStart={beginPinch} onTouchMove={movePinch} onTouchEnd={endPinch} onTouchCancel={endPinch}>
-            {(busy || busyPage) && (
+          <div
+            ref={(node) => {
+              stageRef.current = node;
+              if (node !== stageElement) setStageElement(node);
+            }}
+            className={`stage theme-${readingTheme}`}
+            onTouchStart={beginPinch}
+            onTouchMove={movePinch}
+            onTouchEnd={endPinch}
+            onTouchCancel={endPinch}
+            onPointerDownCapture={stagePointerDown}
+            onPointerUp={stagePointerUp}
+          >
+            {busy && (
               <div className="loading" role="status">
-                <span className="spinner" /> {busy || "Rendering page…"}
+                <span className="spinner" /> {busy}
               </div>
             )}
             <div className="pageViewport">
-              <PageCanvas
-                key={`${sourcePage}-${fontsReady}`}
-                image={image?.source === sourcePage ? image.url : null}
-                info={pageInfo}
+              <DocumentView
+                ref={viewRef}
+                stage={stageElement}
+                pageOrder={doc.pageOrder}
+                pages={open.pages}
+                rotations={doc.rotations}
                 zoom={zoom}
-                rotation={rotation}
-                overlays={shownOverlays}
-                textLines={textLines}
-                originalEdit={originalEdit}
-                crop={doc.crops[sourcePage]}
-                tool={tool}
-                settings={settings}
-                selectedId={selectedId}
-                editingId={editingId}
-                highlight={searchHighlight?.sourcePage === sourcePage ? searchHighlight.rect : null}
-                page={sourcePage}
-                onSelect={(id) => {
-                  if (originalEdit) commitOriginalEdit(originalEdit, false);
-                  if (id !== editingId) setEditingId(null);
-                  setSelectedId(id);
-                  setSearchHighlight(null);
+                renderScale={renderScale}
+                documentKey={open.bytes}
+                page={page}
+                render={renderForView}
+                onPageChange={setPage}
+                onVisibleChange={loadPageData}
+              >
+                {({ source, index, image }) => {
+                  const lines = pageData.get(source)?.lines ?? [];
+                  return (
+                    <div className="pageHost" onPointerDownCapture={() => activatePage(index)}>
+                      <PageCanvas
+                        key={`${source}-${fontsReady}`}
+                        image={image}
+                        info={open.pages[source]!}
+                        zoom={zoom}
+                        rotation={doc.rotations[source] ?? 0}
+                        overlays={overlaysByPage.get(source) ?? []}
+                        textLines={lines}
+                        textEditable={tab === "edit" && (!isPhone || trayOpen)}
+                        links={pageData.get(source)?.links ?? []}
+                        onLink={followLink}
+                        originalEdit={originalEdit?.source === source ? originalEdit : null}
+                        crop={doc.crops[source]}
+                        tool={tool}
+                        settings={settings}
+                        selectedId={selectedId}
+                        editingId={editingId}
+                        highlight={searchHighlight?.sourcePage === source ? searchHighlight.rect : null}
+                        page={source}
+                        onSelect={(id) => {
+                          if (originalEdit) commitOriginalEdit(originalEdit, false);
+                          if (id !== editingId) setEditingId(null);
+                          setSelectedId(id);
+                          setSearchHighlight(null);
+                        }}
+                        onEditText={setEditingId}
+                        onOriginalSelect={(line) => {
+                          if (originalEdit) commitOriginalEdit(originalEdit, false);
+                          setSelectedId(null);
+                          setEditingId(null);
+                          setOriginalEdit({ line, draft: line.text, source, lines });
+                        }}
+                        onOriginalChange={(draft) => setOriginalEdit((currentEdit) => (currentEdit ? { ...currentEdit, draft } : null))}
+                        onOriginalCommit={() => commitOriginalEdit(originalEdit, true)}
+                        onOriginalCancel={() => setOriginalEdit(null)}
+                        onAdd={addOverlays}
+                        onUpdate={update}
+                        onCrop={(crop) => {
+                          execute({ type: "setCrop", page: source, before: doc.crops[source] ?? null, after: crop });
+                          chooseTool("select");
+                          setNotice("Page cropped. Choose Crop again to adjust or remove it.");
+                        }}
+                        onMessage={setError}
+                      />
+                    </div>
+                  );
                 }}
-                onEditText={setEditingId}
-                onOriginalSelect={(line) => {
-                  if (originalEdit) commitOriginalEdit(originalEdit, false);
-                  setSelectedId(null);
-                  setEditingId(null);
-                  setOriginalEdit({ line, draft: line.text, source: sourcePage, lines: textLines });
-                }}
-                onOriginalChange={(draft) => setOriginalEdit((currentEdit) => (currentEdit ? { ...currentEdit, draft } : null))}
-                onOriginalCommit={() => commitOriginalEdit(originalEdit, true)}
-                onOriginalCancel={() => setOriginalEdit(null)}
-                onAdd={addOverlays}
-                onUpdate={update}
-                onCrop={(crop) => {
-                  execute({ type: "setCrop", page: sourcePage, before: doc.crops[sourcePage] ?? null, after: crop });
-                  chooseTool("select");
-                  setNotice("Page cropped. Choose Crop again to adjust or remove it.");
-                }}
-                onMessage={setError}
-              />
+              </DocumentView>
             </div>
           </div>
+          {isPhone && (
+            <button className={`pagePill ${pillShown || immersive ? "" : "faded"}`} aria-label={`Page ${page + 1} of ${doc.pageOrder.length}. Show pages`} onClick={() => setShowRail(true)}>
+              {page + 1} / {doc.pageOrder.length}
+            </button>
+          )}
           <footer className="status">
             <div>
               <button className="iconButton" aria-label={showRail ? "Hide pages" : "Show pages"} title="Pages" aria-pressed={showRail} onClick={() => setShowRail((value) => !value)}>
@@ -2357,6 +2591,20 @@ export function App() {
           </aside>
         )}
       </div>
+      {isPhone && (
+        <div className="phoneDock">
+          {contextContent && <div className="contextBar">{contextContent}</div>}
+          {trayOpen && ribbonBar}
+          <nav className="bottomNav" role="tablist" aria-label="Tool groups">
+            {tabs.map((item) => (
+              <button key={item.id} role="tab" aria-selected={trayOpen && tab === item.id} className={trayOpen && tab === item.id ? "selected" : ""} onClick={() => choosePhoneTab(item.id)}>
+                <item.Icon />
+                <span>{item.label}</span>
+              </button>
+            ))}
+          </nav>
+        </div>
+      )}
       {hiddenInputs}
 
       {dialog === "properties" && (

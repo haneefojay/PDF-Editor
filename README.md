@@ -4,6 +4,11 @@ A local-first, privacy-first PDF editor for the web and Android, licensed under 
 
 ## What it does
 
+**Read**
+- Continuous scrolling through the whole document; only pages near the screen are rendered, so long files stay fast.
+- Navigate with the document outline (bookmarks), clickable internal and web links, thumbnails and search.
+- Night and sepia reading themes, plus full-screen reading on phones (tap the page).
+
 **Edit**
 - Click any line of existing text to change it, keeping its font, size and colour. Tables, rules and backgrounds around the text are left intact.
 - Add text, images, shapes (with fill), lines and arrows, and freehand drawing.
@@ -33,8 +38,8 @@ A local-first, privacy-first PDF editor for the web and Android, licensed under 
 
 **Workflow**
 - Autosave to device storage with recent projects and crash recovery.
-- Full undo/redo, keyboard shortcuts (press `?`), pinch and Ctrl+scroll zoom, fit width/page, dark mode.
-- A responsive layout for phones and desktops, and installable as an app.
+- Full undo/redo, keyboard shortcuts (press `?`), pinch, double-tap and Ctrl+scroll zoom, fit width/page, dark mode.
+- A phone layout with a bottom toolbar, tool trays and options in reach of your thumb; a desktop layout with tabbed tool groups. Installable as an app.
 
 Every export is re-opened and rendered before it is handed to you; a document that fails validation is never saved.
 
@@ -55,6 +60,7 @@ The unit tests in `packages/pdf-engine` build real PDFs with MuPDF and inspect w
 
 - `apps/web`: React/Vite editor
   - `App.tsx`: document state, tools and dialogs
+  - `DocumentView.tsx`: continuous, virtualized page column
   - `PageCanvas.tsx`: page interaction
   - `textMetrics.ts`: font-accurate text preview
   - `layout.ts`: generated headers and footers
