@@ -47,6 +47,9 @@ export type PositionedTextLine = {
   height: number;
   /** Normalized y of the text baseline. */
   baseline: number;
+  /** Text block and line within the page, used to group lines into paragraphs. */
+  block?: number;
+  line?: number;
   size: number;
   color: string;
   fontFamily: string;

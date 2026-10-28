@@ -445,3 +445,26 @@ describe("navigation", () => {
     expect(await engine.getLinks(1)).toEqual([]);
   });
 });
+
+describe("erasing one line of tightly spaced text", () => {
+  const lines = ["First line of the paragraph", "Second line to replace", "Third line stays put."];
+  const body = lines.map((line, index) => `${index ? "0 -14 Td " : ""}(${line}) Tj`).join(" ");
+  const source = makePdf([{ content: `BT /F1 12 Tf 72 680 Td ${body} ET` }]);
+
+  it("leaves the neighbouring lines alone when erasing a baseline band", async () => {
+    const engine = await engineWith(source);
+    const extracted = await engine.extractTextLines(0);
+    const target = extracted.find((line) => line.text.startsWith("Second"))!;
+    // The band the editor erases: from just under the x-height to the baseline.
+    const top = target.baseline - (0.7 * target.size) / 800;
+    const result = await engine.exportDocument(
+      request({
+        overlays: [{ id: "e", page: 0, kind: "redact", x: target.x, y: top, width: target.width, height: (0.65 * target.size) / 800, color: "#ffffff", mode: "eraseText" }],
+      }),
+    );
+    const text = pageText(result.bytes);
+    expect(text).not.toContain("Second");
+    expect(text).toContain("First line of the paragraph");
+    expect(text).toContain("Third line stays put.");
+  });
+});

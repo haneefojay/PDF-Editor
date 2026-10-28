@@ -1379,6 +1379,7 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
       const structured = page.toStructuredText("preserve-whitespace");
       const lines: PositionedTextLine[] = [];
       let lineIndex = -1;
+      let blockIndex = -1;
       let runIndex = 0;
       type Run = {
         key: string;
@@ -1410,6 +1411,8 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
           width: Math.max(0.005, (x1 - x0) / pageWidth),
           height: Math.max(0.005, (y1 - y0) / pageHeight),
           baseline: (current.baseline - bounds[1]) / pageHeight,
+          block: blockIndex,
+          line: lineIndex,
           size: current.size,
           color: current.color,
           alignment: "left",
@@ -1420,6 +1423,10 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
         });
       };
       structured.walk({
+        beginTextBlock: () => {
+          flush();
+          blockIndex += 1;
+        },
         beginLine: () => {
           flush();
           lineIndex += 1;

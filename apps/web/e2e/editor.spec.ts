@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { inspectPdf, longPdf, pngImage, samplePdf } from "./fixtures";
+import { inspectPdf, longPdf, PARAGRAPH_LINES, paragraphPdf, pngImage, samplePdf } from "./fixtures";
 import { clickOnPage, dragOnPage, exportPdf, fitPage, openSample, tab, tool } from "./helpers";
 
 test("edits original text without disturbing the table around it", async ({ page }) => {
@@ -197,4 +197,33 @@ test("edits a page further down without losing the place", async ({ page }) => {
   const pdf = inspectPdf(await exportPdf(page));
   expect(pdf.pages[5]!.annotations).toEqual(["Square"]);
   expect(pdf.pages[0]!.annotations).toEqual([]);
+});
+
+test("edits a whole paragraph and reflows it in the same width", async ({ page }) => {
+  await openSample(page, paragraphPdf(), "paragraph.pdf");
+  await page.getByRole("button", { name: /^Edit PDF text: uploaded, so private/ }).click();
+  const editor = page.getByRole("textbox", { name: "Edit paragraph" });
+  await expect(editor).toHaveValue(PARAGRAPH_LINES.join(" "));
+  await expect(page.locator(".editingLabel")).toContainText("4 lines");
+  await editor.fill(PARAGRAPH_LINES.join(" ").replace("medical letters", "medical letters, tax returns, school reports"));
+  await page.keyboard.press("Control+Enter");
+  const text = inspectPdf(await exportPdf(page)).pages[0]!.text;
+  const lines = text.split("\n").filter((line) => line.trim() && line !== "Privacy first");
+  expect(lines.join(" ")).toContain("medical letters, tax returns, school reports and bank papers");
+  // Reflowed into more lines rather than overflowing the original width.
+  expect(lines.length).toBeGreaterThan(PARAGRAPH_LINES.length);
+  expect(text).toContain("Privacy first");
+});
+
+test("can fall back to editing a single line of a paragraph", async ({ page }) => {
+  await openSample(page, paragraphPdf(), "paragraph.pdf");
+  await page.getByRole("button", { name: /^Edit PDF text: never leave the phone/ }).click();
+  await page.getByRole("button", { name: "This line only" }).click();
+  const editor = page.getByRole("textbox", { name: "Edit original PDF text" });
+  await expect(editor).toHaveValue(PARAGRAPH_LINES[2]!);
+  await editor.fill("never leave this laptop.");
+  await page.keyboard.press("Control+Enter");
+  const text = inspectPdf(await exportPdf(page)).pages[0]!.text;
+  expect(text).toContain("never leave this laptop.");
+  expect(text).toContain(PARAGRAPH_LINES[3]!);
 });

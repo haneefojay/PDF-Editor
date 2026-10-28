@@ -11,6 +11,7 @@ import type { PageInfo, PageLink, PositionedTextLine } from "@paperless/pdf-engi
 import { fitTextBox, layoutStyled, previewTextStyle } from "./textMetrics";
 import { boundsOf, snapToText, type Rect } from "./geometry";
 import { LAYOUT_ID } from "./layout";
+import { reflowWidth, type Paragraph } from "./paragraphs";
 
 export type ShapeKind = "rectangle" | "square" | "circle" | "triangle";
 export type MarkupKind = "highlight" | "underline" | "strikeout" | "squiggly";
@@ -45,7 +46,14 @@ export type CanvasSettings = {
 };
 
 /** An in-progress edit of original text, with the page's text runs at the time. */
-export type OriginalEdit = { line: PositionedTextLine; draft: string; source: number; lines: PositionedTextLine[] };
+export type OriginalEdit = {
+  line: PositionedTextLine;
+  draft: string;
+  source: number;
+  lines: PositionedTextLine[];
+  /** Set when a whole paragraph is being edited and will reflow as one box. */
+  paragraph?: Paragraph;
+};
 
 const rectTools: Tool[] = ["shape", "redact", "crop", "markup", "measure", "form"];
 const pointTools: Tool[] = ["ink", "line"];
@@ -486,8 +494,12 @@ export function PageCanvas(props: {
   const liveMarkup = liveRect && tool === "markup" ? snapToText(liveRect, props.textLines) : [];
   const editing = shown.find((overlay): overlay is TextOverlay => overlay.kind === "text" && overlay.id === props.editingId) ?? null;
   const original = props.originalEdit;
-  const originalBox = original ? fitTextBox({ ...original.line, fitMode: "auto", lineHeight: 1.2 }, original.draft, info) : null;
-  const originalLayout = original && originalBox ? layoutStyled({ ...original.line, fitMode: "auto", lineHeight: 1.2 }, original.draft, info, originalBox.width) : null;
+  const paragraph = original?.paragraph;
+  const originalStyle = original ? { ...original.line, fitMode: "auto" as const, lineHeight: paragraph ? original.line.lineHeight : 1.2 } : null;
+  const originalArea = paragraph ?? original?.line ?? null;
+  const originalBox = original && originalStyle ? (paragraph ? { width: reflowWidth(paragraph) } : fitTextBox(originalStyle, original.draft, info)) : null;
+  const originalLayout = original && originalStyle && originalBox ? layoutStyled(originalStyle, original.draft, info, originalBox.width) : null;
+  const editedLines = new Set((paragraph?.lines ?? (original ? [original.line] : [])).map((line) => line.id));
   const draftSize = draft?.kind === "text" ? settings.textSize : 11;
   // Focus new editors without letting the browser scroll the page sideways.
   const focusOnce = (node: HTMLTextAreaElement | null) => {
@@ -534,8 +546,12 @@ export function PageCanvas(props: {
                 style={{ ...percent(overlay), opacity: overlay.opacity, transform: `rotate(${overlay.rotation}deg)` }}
               />
             );
-          if (overlay.kind === "redact" && overlay.mode !== "redact" && (overlay.mode || overlay.color.toLowerCase() === "#ffffff"))
-            return <span key={overlay.id} className="eraseOverlay" style={percent(overlay)} />;
+          if (overlay.kind === "redact" && overlay.mode !== "redact" && (overlay.mode || overlay.color.toLowerCase() === "#ffffff")) {
+            // Text erasure only removes a band around the baseline; cover the
+            // whole glyph height on screen so ascenders and descenders vanish.
+            const shown = overlay.mode === "eraseText" ? { ...overlay, y: overlay.y - overlay.height * 0.55, height: overlay.height * 2 } : overlay;
+            return <span key={overlay.id} className="eraseOverlay" style={percent(shown)} />;
+          }
           if (overlay.kind === "visualSignature")
             return overlay.mode === "image" && overlay.dataUrl ? (
               <img key={overlay.id} className="visualSignatureOverlay" src={overlay.dataUrl} alt={`Signature of ${overlay.signer}`} draggable={false} style={percent(overlay)} />
@@ -741,7 +757,7 @@ export function PageCanvas(props: {
         {tool === "select" &&
           props.textEditable &&
           props.textLines
-            .filter((line) => !lineWasReplaced(line) && line.id !== original?.line.id)
+            .filter((line) => !lineWasReplaced(line) && !editedLines.has(line.id))
             .map((line) => (
               <button
                 key={line.id}
@@ -755,21 +771,23 @@ export function PageCanvas(props: {
                 }}
               />
             ))}
-        {original && originalLayout && (
+        {original && originalLayout && originalArea && originalStyle && (
           <>
-            <span className="eraseOverlay" style={percent(original.line)} />
+            {(paragraph?.lines ?? [original.line]).map((line) => (
+              <span key={line.id} className="eraseOverlay" style={percent(line)} />
+            ))}
             <textarea
               ref={focusOnce}
               className="inlineEditor"
-              aria-label="Edit original PDF text"
+              aria-label={paragraph ? "Edit paragraph" : "Edit original PDF text"}
               value={original.draft}
               spellCheck={false}
               style={{
-                left: `${original.line.x * 100}%`,
-                top: `${original.line.y * 100}%`,
-                width: `${Math.max(original.line.width, originalBox!.width) * 100}%`,
-                height: `${Math.max(original.line.height, originalLayout.height / info.height) * 100}%`,
-                ...previewTextStyle({ ...original.line, lineHeight: 1.2 }, originalLayout.size, zoom),
+                left: `${originalArea.x * 100}%`,
+                top: `${originalArea.y * 100}%`,
+                width: `${Math.max(originalArea.width, originalBox!.width) * 100}%`,
+                height: `${Math.max(originalArea.height, originalLayout.height / info.height) * 100}%`,
+                ...previewTextStyle(originalStyle, originalLayout.size, zoom),
                 textAlign: original.line.alignment,
               }}
               onPointerDown={(event) => event.stopPropagation()}

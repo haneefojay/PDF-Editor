@@ -110,6 +110,7 @@ import { useMediaQuery } from "./hooks";
 import { dataUrlToBlob, downloadBlob, readAsDataUrl } from "./files";
 import { boundsOf } from "./geometry";
 import { layoutOverlays } from "./layout";
+import { findParagraph, reflowWidth } from "./paragraphs";
 
 type Engine = ReturnType<typeof createPdfEngine>;
 type OpenDoc = {
@@ -1194,16 +1195,61 @@ export function App() {
       fitMode: "auto",
     };
   };
-  const eraseBox = (line: { x: number; y: number; width: number; height: number }, source: number): Overlay => {
+  /**
+   * Erases a line of text. Only a band from just below the x-height to the
+   * baseline is erased: every glyph of the line crosses it, while glyph boxes
+   * of tightly spaced neighbouring lines never reach it.
+   */
+  const eraseBox = (line: { x: number; width: number; baseline: number; size: number }, source: number): Overlay => {
+    const pageHeight = open?.pages[source]?.height ?? 792;
     const pad = 0.0015;
-    const y = Math.max(0, line.y - pad);
-    return { id: crypto.randomUUID(), page: source, kind: "redact", x: Math.max(0, line.x - pad), y, width: Math.min(1, line.width + pad * 2), height: Math.min(1 - y, line.height + pad * 2), color: "#ffffff", mode: "eraseText" };
+    const y = Math.max(0, line.baseline - (0.7 * line.size) / pageHeight);
+    return {
+      id: crypto.randomUUID(),
+      page: source,
+      kind: "redact",
+      x: Math.max(0, line.x - pad),
+      y,
+      width: Math.min(1, line.width + pad * 2),
+      height: Math.min(1 - y, (0.65 * line.size) / pageHeight),
+      color: "#ffffff",
+      mode: "eraseText",
+    };
   };
   const buildReplacement = (edit: OriginalEdit) => {
     const source = edit.source;
     const info = open?.pages[source];
     if (!info) return { overlays: [] as Overlay[], selectId: null as string | null };
     const line = edit.line;
+    if (edit.paragraph) {
+      // One box that reflows within the paragraph's width.
+      const paragraph = edit.paragraph;
+      const erase = paragraph.lines.map((item) => eraseBox(item, source));
+      if (!edit.draft.trim()) return { overlays: erase, selectId: null };
+      const style = { ...line, x: paragraph.x, width: reflowWidth(paragraph), height: paragraph.height, fitMode: "auto" as const };
+      const overlay: TextOverlay = {
+        id: crypto.randomUUID(),
+        page: source,
+        kind: "text",
+        x: paragraph.x,
+        y: topForBaseline(style, paragraph.lines[0]!.baseline, info),
+        width: style.width,
+        height: Math.max(paragraph.height, layoutStyled(style, edit.draft, info).height / info.height),
+        text: edit.draft,
+        size: line.size,
+        color: line.color,
+        fontFamily: line.fontFamily,
+        fontName: line.fontName || null,
+        bold: line.bold,
+        italic: line.italic,
+        underline: false,
+        alignment: line.alignment,
+        lineHeight: line.lineHeight,
+        letterSpacing: line.letterSpacing,
+        fitMode: "auto",
+      };
+      return { overlays: [...erase, overlay], selectId: overlay.id };
+    }
     // Runs on the same baseline that touch the edited run form one mixed-style
     // line; separate cells or columns further away are left alone.
     const sameBaseline = edit.lines.filter((candidate) => Math.abs(candidate.baseline - line.baseline) < 0.002).sort((a, b) => a.x - b.x);
@@ -1221,9 +1267,7 @@ export function App() {
     // Mixed-style line: re-flow every run so later runs move with the edit.
     const left = Math.min(...runs.map((run) => run.x));
     const right = Math.max(...runs.map((run) => run.x + run.width));
-    const top = Math.min(...runs.map((run) => run.y));
-    const bottom = Math.max(...runs.map((run) => run.y + run.height));
-    const overlays: Overlay[] = [eraseBox({ x: left, y: top, width: right - left, height: bottom - top }, source)];
+    const overlays: Overlay[] = [eraseBox({ x: left, width: right - left, baseline: line.baseline, size: Math.max(...runs.map((run) => run.size)) }, source)];
     // Runs before the edited one stay put; later runs keep their original
     // gaps but shift with the edited run's new width.
     const editedIndex = runs.findIndex((run) => run.id === line.id);
@@ -1250,7 +1294,10 @@ export function App() {
     if (!edit) return;
     setOriginalEdit(null);
     const extracted = edit.lines.find((line) => line.id === edit.line.id);
-    if (edit.draft === edit.line.text && JSON.stringify(extracted) === JSON.stringify(edit.line)) return;
+    if (edit.paragraph) {
+      const original = { ...extracted, alignment: edit.paragraph.alignment, lineHeight: edit.paragraph.lineHeight };
+      if (edit.draft === edit.paragraph.text && JSON.stringify(original) === JSON.stringify(edit.line)) return;
+    } else if (edit.draft === edit.line.text && JSON.stringify(extracted) === JSON.stringify(edit.line)) return;
     const { overlays, selectId } = buildReplacement(edit);
     if (!overlays.length) return;
     execute({ type: "addMany", overlays });
@@ -2041,8 +2088,19 @@ export function App() {
       return (
         <>
           <span className="editingLabel">
-            <Pencil /> Editing original text
+            <Pencil /> {originalEdit.paragraph ? `Editing paragraph (${originalEdit.paragraph.lines.length} lines)` : "Editing original text"}
           </span>
+          {originalEdit.paragraph && (
+            <button
+              title="Edit only the line you tapped"
+              onClick={() => {
+                const extracted = originalEdit.lines.find((line) => line.id === originalEdit.line.id) ?? originalEdit.line;
+                setOriginalEdit({ line: extracted, draft: extracted.text, source: originalEdit.source, lines: originalEdit.lines });
+              }}
+            >
+              This line only
+            </button>
+          )}
           {textControls({ ...originalEdit.line, fontName: originalEdit.line.fontName }, (patch) => setOriginalEdit({ ...originalEdit, line: { ...originalEdit.line, ...patch, fontName: patch.fontName ?? (patch.bold !== undefined || patch.italic !== undefined ? "" : originalEdit.line.fontName) } as PositionedTextLine }))}
           <button className="primaryAction" onClick={() => commitOriginalEdit(originalEdit, true)} title="Apply (Ctrl+Enter)">
             Apply
@@ -2454,7 +2512,13 @@ export function App() {
                           if (originalEdit) commitOriginalEdit(originalEdit, false);
                           setSelectedId(null);
                           setEditingId(null);
-                          setOriginalEdit({ line, draft: line.text, source, lines });
+                          // A line inside a uniform paragraph edits the whole paragraph.
+                          const paragraph = findParagraph(lines, line, open.pages[source]!);
+                          setOriginalEdit(
+                            paragraph
+                              ? { line: { ...line, alignment: paragraph.alignment, lineHeight: paragraph.lineHeight }, draft: paragraph.text, source, lines, paragraph }
+                              : { line, draft: line.text, source, lines },
+                          );
                         }}
                         onOriginalChange={(draft) => setOriginalEdit((currentEdit) => (currentEdit ? { ...currentEdit, draft } : null))}
                         onOriginalCommit={() => commitOriginalEdit(originalEdit, true)}
