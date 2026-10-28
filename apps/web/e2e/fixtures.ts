@@ -78,3 +78,26 @@ export function longPdf() {
   doc.destroy();
   return bytes;
 }
+
+export const PARAGRAPH_LINES = [
+  "Paperless keeps every document on your own device. Nothing is",
+  "uploaded, so private contracts, medical letters and bank papers",
+  "never leave the phone or computer you are working on, and the",
+  "editor works the same way with or without a network connection.",
+];
+
+/** A heading followed by a wrapped paragraph of four lines. */
+export function paragraphPdf() {
+  const doc = new mupdf.PDFDocument();
+  const resources = doc.newDictionary();
+  const fonts = doc.newDictionary();
+  resources.put("Font", fonts);
+  fonts.put("F1", doc.addSimpleFont(new mupdf.Font("Helvetica")));
+  fonts.put("F2", doc.addSimpleFont(new mupdf.Font("Helvetica-Bold")));
+  const body = PARAGRAPH_LINES.map((line, index) => `${index ? "0 -16 Td " : ""}(${line}) Tj`).join(" ");
+  const content = `BT /F2 20 Tf 72 720 Td (Privacy first) Tj ET BT /F1 12 Tf 72 680 Td ${body} ET`;
+  doc.insertPage(-1, doc.addPage([0, 0, 612, 792], 0, resources, content));
+  const bytes = Buffer.from(doc.saveToBuffer("").asUint8Array());
+  doc.destroy();
+  return bytes;
+}
