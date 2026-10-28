@@ -2176,3 +2176,13 @@ details.more > div label {
     top: -42px;
   }
 }
+
+.eraserCursor {
+  fill: #ffffff66;
+  stroke: #444;
+  stroke-width: 1px;
+  stroke-dasharray: 3 2;
+}
+.page.tool-eraser {
+  cursor: none;
+}

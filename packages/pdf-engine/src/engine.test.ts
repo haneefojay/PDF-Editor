@@ -513,3 +513,17 @@ describe("removing embedded images", () => {
     expect(colourAt(result.bytes, 425 / 600, (800 - 125) / 800)).toEqual([0, 0, 0]);
   });
 });
+
+describe("highlighter strokes", () => {
+  it("exports ink opacity", async () => {
+    const engine = await engineWith(makePdf([{}]));
+    const result = await engine.exportDocument(
+      request({ overlays: [{ id: "h", page: 0, kind: "ink", points: [{ x: 0.1, y: 0.1 }, { x: 0.5, y: 0.1 }], color: "#ffd400", width: 14, opacity: 0.4 }] }),
+    );
+    const doc = mupdf.Document.openDocument(result.bytes, "application/pdf") as mupdf.PDFDocument;
+    const [annotation] = doc.loadPage(0).getAnnotations();
+    expect(annotation!.getType()).toBe("Ink");
+    expect(annotation!.getOpacity()).toBeCloseTo(0.4, 2);
+    doc.destroy();
+  });
+});

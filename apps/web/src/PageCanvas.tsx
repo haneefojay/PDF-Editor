@@ -20,6 +20,7 @@ type TextOverlay = Extract<Overlay, { kind: "text" }>;
 
 export type CanvasSettings = {
   shapeKind: ShapeKind;
+  penStyle: "pen" | "highlighter";
   drawColor: string;
   fillColor: string | null;
   strokeWidth: number;
@@ -126,6 +127,7 @@ export function PageCanvas(props: {
   onOriginalCommit: () => void;
   onOriginalCancel: () => void;
   onAdd: (overlays: Overlay[]) => void;
+  onRemove: (overlays: Overlay[]) => void;
   onUpdate: (before: Overlay, after: Overlay, merge?: string) => void;
   onCrop: (crop: Rect) => void;
   onMessage: (message: string) => void;
@@ -140,6 +142,9 @@ export function PageCanvas(props: {
   const [preview, setPreview] = useState<Overlay | null>(null);
   const [guides, setGuides] = useState<{ x?: number; y?: number }>({});
   const [draft, setDraftState] = useState<Draft | null>(null);
+  // Strokes the eraser has touched during the current drag.
+  const [erasing, setErasing] = useState<Set<string>>(new Set());
+  const [eraserAt, setEraserAt] = useState<Point | null>(null);
   // Commits can come from both blur and a page click; the ref makes them idempotent.
   const draftRef = useRef<Draft | null>(null);
   const setDraft = (next: Draft | null) => {
@@ -234,6 +239,23 @@ export function PageCanvas(props: {
     ]);
   };
 
+  /** Strokes passing within the eraser's radius of a point (in page points). */
+  const strokesNear = (at: Point) => {
+    const radius = 10 / zoom;
+    const distance = (a: Point, b: Point) => {
+      const ax = a.x * info.width, ay = a.y * info.height, bx = b.x * info.width, by = b.y * info.height;
+      const px = at.x * info.width, py = at.y * info.height;
+      const length = (bx - ax) ** 2 + (by - ay) ** 2;
+      const t = length ? Math.max(0, Math.min(1, ((px - ax) * (bx - ax) + (py - ay) * (by - ay)) / length)) : 0;
+      return Math.hypot(px - (ax + t * (bx - ax)), py - (ay + t * (by - ay)));
+    };
+    return props.overlays.filter(
+      (overlay) =>
+        (overlay.kind === "ink" || overlay.kind === "signature" || overlay.kind === "line") &&
+        overlay.points.some((point, index) => distance(point, overlay.points[Math.min(index + 1, overlay.points.length - 1)]!) <= radius + overlay.width / 2),
+    );
+  };
+
   const down = (event: ReactPointerEvent) => {
     if (event.button > 0) return;
     if (draftRef.current) {
@@ -289,8 +311,12 @@ export function PageCanvas(props: {
     wrapRef.current?.setPointerCapture(event.pointerId);
     start.current = at;
     points.current = [at];
-    setLivePoints([at]);
+    setLivePoints(tool === "eraser" ? [] : [at]);
     setLiveRect(null);
+    if (tool === "eraser") {
+      setEraserAt(at);
+      setErasing(new Set(strokesNear(at).map((overlay) => overlay.id)));
+    }
   };
 
   const move = (event: ReactPointerEvent) => {
@@ -354,7 +380,13 @@ export function PageCanvas(props: {
       }
       return;
     }
+    if (tool === "eraser") setEraserAt(current);
     if (!start.current) return;
+    if (tool === "eraser") {
+      const touched = strokesNear(current);
+      if (touched.some((overlay) => !erasing.has(overlay.id))) setErasing(new Set([...erasing, ...touched.map((overlay) => overlay.id)]));
+      return;
+    }
     if (pointTools.includes(tool) || (tool === "signature" && settings.signatureMode === "draw")) {
       points.current = tool === "line" ? [start.current, current] : [...points.current, current];
       setLivePoints(points.current);
@@ -387,12 +419,26 @@ export function PageCanvas(props: {
     points.current = [];
     setLivePoints([]);
     setLiveRect(null);
+    if (tool === "eraser") {
+      const removed = props.overlays.filter((overlay) => erasing.has(overlay.id));
+      setErasing(new Set());
+      if (removed.length) props.onRemove(removed);
+      return;
+    }
     const id = crypto.randomUUID();
     if ((tool === "ink" || (tool === "signature" && settings.signatureMode === "draw")) && stroke.length > 1)
       props.onAdd([
         tool === "signature"
           ? { id, page, kind: "signature", points: stroke, color: "#1d2a5b", width: 2 }
-          : { id, page, kind: "ink", points: stroke, color: settings.drawColor, width: settings.strokeWidth },
+          : {
+              id,
+              page,
+              kind: "ink",
+              points: stroke,
+              color: settings.drawColor,
+              width: settings.strokeWidth,
+              ...(settings.penStyle === "highlighter" ? { opacity: 0.4 } : {}),
+            },
       ]);
     if (tool === "line" && Math.hypot(end.x - origin.x, end.y - origin.y) > 0.01)
       props.onAdd([{ id, page, kind: "line", points: [origin, end], color: settings.drawColor, width: settings.strokeWidth, arrow: settings.lineArrow }]);
@@ -483,7 +529,7 @@ export function PageCanvas(props: {
       ]);
   };
 
-  const shown = props.overlays.map((overlay) => (preview?.id === overlay.id ? preview : overlay));
+  const shown = props.overlays.filter((overlay) => !erasing.has(overlay.id)).map((overlay) => (preview?.id === overlay.id ? preview : overlay));
   const objectDown = (event: ReactPointerEvent, overlay: Overlay, mode: "move" | "resize" | "rotate") => {
     if (tool !== "select" || event.button > 0) return;
     event.stopPropagation();
@@ -622,7 +668,18 @@ export function PageCanvas(props: {
           {shown.map((overlay) => {
             const line = { vectorEffect: "non-scaling-stroke" as const, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
             if (overlay.kind === "ink" || overlay.kind === "signature")
-              return <polyline key={overlay.id} points={overlay.points.map((point) => `${point.x},${point.y}`).join(" ")} fill="none" stroke={overlay.color} strokeWidth={overlay.width * zoom} {...line} />;
+              return (
+                <polyline
+                  key={overlay.id}
+                  points={overlay.points.map((point) => `${point.x},${point.y}`).join(" ")}
+                  fill="none"
+                  stroke={overlay.color}
+                  strokeWidth={overlay.width * zoom}
+                  opacity={overlay.kind === "ink" ? overlay.opacity : undefined}
+                  style={overlay.kind === "ink" && overlay.opacity !== undefined ? { mixBlendMode: "multiply" } : undefined}
+                  {...line}
+                />
+              );
             if (overlay.kind === "line")
               return (
                 <line
@@ -709,6 +766,7 @@ export function PageCanvas(props: {
               <polyline
                 points={livePoints.map((point) => `${point.x},${point.y}`).join(" ")}
                 fill="none"
+                opacity={tool === "ink" && settings.penStyle === "highlighter" ? 0.4 : undefined}
                 stroke={tool === "signature" ? "#1d2a5b" : settings.drawColor}
                 strokeWidth={(tool === "signature" ? 2 : settings.strokeWidth) * zoom}
                 vectorEffect="non-scaling-stroke"
@@ -740,6 +798,9 @@ export function PageCanvas(props: {
           )}
           {props.crop && <rect className="cropRect" {...props.crop} vectorEffect="non-scaling-stroke" />}
           {props.highlight && <rect className="searchHighlight" {...props.highlight} />}
+          {tool === "eraser" && eraserAt && (
+            <ellipse className="eraserCursor" cx={eraserAt.x} cy={eraserAt.y} rx={10 / zoom / info.width} ry={10 / zoom / info.height} vectorEffect="non-scaling-stroke" />
+          )}
           {guides.x !== undefined && <line className="guide" x1={guides.x} y1="0" x2={guides.x} y2="1" vectorEffect="non-scaling-stroke" />}
           {guides.y !== undefined && <line className="guide" x1="0" y1={guides.y} x2="1" y2={guides.y} vectorEffect="non-scaling-stroke" />}
         </svg>

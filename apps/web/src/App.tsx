@@ -28,6 +28,7 @@ import {
   Crop,
   Download,
   Eraser,
+  EyeOff,
   FileImage,
   FileKey2,
   FileOutput,
@@ -162,7 +163,7 @@ const pngUrl = (png: Uint8Array) => {
 };
 const isTyping = (target: EventTarget | null) =>
   target instanceof HTMLElement && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName));
-const toolShortcuts: Partial<Record<string, Tool>> = { v: "select", t: "text", d: "ink", h: "markup", n: "note", r: "shape", l: "line", s: "signature" };
+const toolShortcuts: Partial<Record<string, Tool>> = { v: "select", t: "text", d: "ink", e: "eraser", h: "markup", n: "note", r: "shape", l: "line", s: "signature" };
 const shortcutFor = (tool: Tool) => Object.entries(toolShortcuts).find(([, value]) => value === tool)?.[0]?.toUpperCase();
 
 function Thumbnail({ source, rotation, url, onVisible }: { source: number; rotation: number; url?: string; onVisible: (source: number) => void }) {
@@ -239,6 +240,7 @@ export function App() {
   const [fit, setFit] = useState<"width" | "page" | null>("width");
   const [settings, setSettings] = useState<CanvasSettings>({
     shapeKind: "rectangle",
+    penStyle: "pen",
     drawColor: "#d64b35",
     fillColor: null,
     strokeWidth: 2,
@@ -964,8 +966,12 @@ export function App() {
     if (!overlays.length) return;
     execute(overlays.length === 1 ? { type: "add", overlay: overlays[0]! } : { type: "addMany", overlays });
     const last = overlays.at(-1)!;
-    setSelectedId(last.id);
-    if (["text", "attachment", "note", "stamp", "formField", "visualSignature"].includes(last.kind)) setTool("select");
+    // One-shot tools hand over to Select with the new object selected; drawing
+    // tools stay active with their options visible for the next stroke.
+    if (["text", "attachment", "note", "stamp", "formField", "visualSignature", "image"].includes(last.kind)) {
+      setSelectedId(last.id);
+      setTool("select");
+    }
     if (last.kind === "attachment") updateSettings({ pendingAttachment: null });
   };
   const update = (before: Overlay, after: Overlay, merge?: string) => execute({ type: "updateOverlay", before, after }, merge);
@@ -1840,7 +1846,8 @@ export function App() {
         toolItem("shape", "Shapes", Shapes),
         toolItem("line", "Line", ArrowUpRight, "Line or arrow"),
         toolItem("ink", "Draw", PenLine),
-        toolItem("redact", "Redact", Eraser, "Permanently remove content under a box"),
+        toolItem("eraser", "Eraser", Eraser, "Erase pen, highlighter and line strokes"),
+        toolItem("redact", "Redact", EyeOff, "Permanently remove content under a box"),
         { key: "pageImages", label: "Page images", Icon: FileImage, action: () => void openNativeImages(), title: "Extract or replace images in this page" },
       ],
     },
@@ -2018,9 +2025,14 @@ export function App() {
           </label>
         </>
       );
+    if (tool === "eraser") return <span className="hint">Drag across pen, highlighter or line strokes to erase them.</span>;
     if (tool === "line" || tool === "ink")
       return (
         <>
+          {tool === "ink" &&
+            select("Pen", settings.penStyle, [["pen", "Pen"], ["highlighter", "Highlighter"]], (penStyle) =>
+              updateSettings(penStyle === "highlighter" ? { penStyle, drawColor: "#ffd400", strokeWidth: 14 } : { penStyle, drawColor: "#d64b35", strokeWidth: 2 }),
+            )}
           {tool === "line" && select("Ends", settings.lineArrow, [["none", "Plain line"], ["end", "Arrow"], ["both", "Double arrow"]], (lineArrow) => updateSettings({ lineArrow }))}
           {colorField("Colour", settings.drawColor, (drawColor) => updateSettings({ drawColor }))}
           <label>
@@ -2545,6 +2557,7 @@ export function App() {
                         onOriginalCommit={() => commitOriginalEdit(originalEdit, true)}
                         onOriginalCancel={() => setOriginalEdit(null)}
                         onAdd={addOverlays}
+                        onRemove={(removed) => execute(removed.length === 1 ? { type: "remove", overlay: removed[0]! } : { type: "removeMany", overlays: removed })}
                         onUpdate={update}
                         onCrop={(crop) => {
                           execute({ type: "setCrop", page: source, before: doc.crops[source] ?? null, after: crop });
@@ -3211,7 +3224,7 @@ export function App() {
               ["Ctrl + / Ctrl − / Ctrl+0", "Zoom in / out / fit width"],
               ["Ctrl + scroll, pinch", "Zoom"],
               ["← → / PgUp PgDn / Home End", "Change page"],
-              ["V T D L R H N S", "Select, Text, Draw, Line, Shapes, Highlight, Note, Sign"],
+              ["V T D E L R H N S", "Select, Text, Draw, Eraser, Line, Shapes, Highlight, Note, Sign"],
               ["Del", "Delete selection"],
               ["Arrows (Shift)", "Nudge selection (further)"],
               ["Ctrl+C / Ctrl+V / Ctrl+D", "Copy / paste / duplicate selection"],

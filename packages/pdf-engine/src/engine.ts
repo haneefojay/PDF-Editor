@@ -1128,6 +1128,7 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
           annotation.setInkList([overlay.points.map((point) => fitzPoint(point, frame))]);
           annotation.setColor(parseColor(overlay.color));
           annotation.setBorderWidth(overlay.width);
+          if (overlay.kind === "ink" && overlay.opacity !== undefined && overlay.opacity < 1) annotation.setOpacity(overlay.opacity);
           annotation.setFlags(mupdf.PDFAnnotation.IS_PRINT);
           annotation.update();
           annotation.destroy();

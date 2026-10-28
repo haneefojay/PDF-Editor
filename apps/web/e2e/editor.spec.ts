@@ -26,7 +26,8 @@ test("adds text, highlights and shapes, including on a rotated page", async ({ p
   await tab(page, "Comment");
   await tool(page, "Highlight");
   await dragOnPage(page, [0.09, 0.115], [0.5, 0.118]);
-  await expect(page.locator(".contextBar")).toContainText("Comment");
+  // The tool stays active for the next highlight.
+  await expect(page.locator(".contextBar")).toContainText("snaps to the lines");
 
   await tab(page, "Pages");
   await tool(page, "Rotate right");
@@ -145,6 +146,7 @@ test("keyboard shortcuts edit, undo and delete objects", async ({ page }) => {
   await page.keyboard.press("v");
   const boxes = page.locator(".objectBox");
   await expect(boxes).toHaveCount(1);
+  await boxes.first().click();
   await page.keyboard.press("Control+d");
   await expect(boxes).toHaveCount(2);
   await page.keyboard.press("Delete");
@@ -247,4 +249,20 @@ test("moves an image that is part of the page without leaving a hole", async ({ 
   // The image is drawn at its new place.
   const moved = colourAt(bytes, 360 / 600, 240 / 800);
   expect(Math.max(...moved)).toBeLessThan(40);
+});
+
+test("draws with the highlighter and erases pen strokes", async ({ page }) => {
+  await openSample(page);
+  await fitPage(page);
+  await tool(page, "Draw");
+  await page.locator(".contextBar select").first().selectOption("highlighter");
+  await dragOnPage(page, [0.1, 0.3], [0.5, 0.3]);
+  await page.locator(".contextBar select").first().selectOption("pen");
+  await dragOnPage(page, [0.1, 0.6], [0.5, 0.6]);
+  await dragOnPage(page, [0.1, 0.7], [0.5, 0.7]);
+  await tool(page, "Eraser");
+  await dragOnPage(page, [0.3, 0.55], [0.3, 0.65]);
+  const bytes = await exportPdf(page);
+  const pdf = inspectPdf(bytes);
+  expect(pdf.pages[0]!.annotations).toEqual(["Ink", "Ink"]);
 });
