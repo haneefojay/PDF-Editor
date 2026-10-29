@@ -316,3 +316,19 @@ describe("batch commands", () => {
     expect(applyCommand(applied, inverseCommand(command)).pageOrder).toEqual([0, 1]);
   });
 });
+
+describe("bookmarks", () => {
+  it("are kept as the file's until edited, and edits undo", async () => {
+    const { applyCommand, emptyDocument, inverseCommand, EditorDocumentSchema } = await import("./index");
+    const start = emptyDocument(2);
+    expect(start.bookmarks).toBeNull();
+    // Projects saved before bookmarks existed still load.
+    const { bookmarks: _ignored, ...legacy } = start;
+    void _ignored;
+    expect(EditorDocumentSchema.parse(legacy).bookmarks).toBeNull();
+    const command = { type: "setBookmarks" as const, before: null, after: [{ id: "a", title: "Intro", page: 0, depth: 0 }] };
+    const edited = applyCommand(start, command);
+    expect(edited.bookmarks).toEqual([{ id: "a", title: "Intro", page: 0, depth: 0 }]);
+    expect(applyCommand(edited, inverseCommand(command)).bookmarks).toBeNull();
+  });
+});

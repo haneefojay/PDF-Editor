@@ -15,6 +15,7 @@ export type {
   PageLayout,
   DocumentInfo,
   ExportResult,
+  FileAnnotation,
   FormField,
   OutlineEntry,
   PageMapping,

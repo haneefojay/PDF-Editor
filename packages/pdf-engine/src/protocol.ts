@@ -92,6 +92,24 @@ export type LayoutRect = { x: number; y: number; width: number; height: number; 
 export type LayoutTable = { columns: number[]; rows: number[]; ruled: boolean };
 export type PageLayout = { width: number; height: number; spans: LayoutSpan[]; images: LayoutImage[]; rects: LayoutRect[]; tables: LayoutTable[] };
 
+/** An annotation already in the file, for the annotation list. */
+export type FileAnnotation = {
+  id: string;
+  page: number;
+  type: string;
+  /** The note's text, or the text under a highlight. */
+  text: string;
+  comment: string;
+  author: string;
+  modified: string | null;
+  color: string | null;
+  /** Normalized to the displayed page. */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
 export type OutlineEntry = {
   title: string;
   /** Target page index, or null when the entry has no destination in this file. */
@@ -125,6 +143,11 @@ export type ExportRequest = {
   compression?: "original" | "balanced" | "small";
   sanitizeMetadata?: boolean;
   flattenForms?: boolean;
+  /**
+   * Replaces the outline when given. Pages are positions in the exported
+   * document; `top` is a normalized offset from the top of the page.
+   */
+  bookmarks?: { title: string; page: number | null; top?: number; depth: number; uri?: string }[];
   encryption?: {
     userPassword: string;
     ownerPassword: string;
@@ -201,6 +224,8 @@ export interface PdfWorkerApi {
   listPageImages(index: number): Promise<Omit<PageImage, "dataUrl">[]>;
   /** The document outline (bookmarks), flattened in reading order. */
   getOutline(): Promise<OutlineEntry[]>;
+  /** Comments and markup already in the file (not links, form fields or popups). */
+  listAnnotations(): Promise<FileAnnotation[]>;
   getLinks(index: number): Promise<PageLink[]>;
   exportDocument(request: ExportRequest): Promise<ExportResult>;
   /**

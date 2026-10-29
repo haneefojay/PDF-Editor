@@ -725,3 +725,71 @@ describe("HTML layout", () => {
     doc.destroy();
   });
 });
+
+describe("bookmarks", () => {
+  it("replaces the outline with nested entries in export order", async () => {
+    const engine = await engineWith(makePdf([{}, {}, {}]));
+    const exported = await engine.exportDocument(
+      request({
+        pageOrder: [2, 0, 1],
+        bookmarks: [
+          { title: "Chapter A", page: 0, depth: 0 },
+          { title: "Section A.1", page: 1, top: 0.5, depth: 1 },
+          { title: "Deep jump", page: 2, depth: 3 },
+          { title: "Website", page: null, depth: 0, uri: "https://example.com/" },
+          { title: "   ", page: 0, depth: 0 },
+          { title: "Missing page", page: 9, depth: 0 },
+        ],
+      }),
+    );
+    const engineAfter = await engineWith(new Uint8Array(exported.bytes).buffer);
+    const outline = await engineAfter.getOutline();
+    expect(outline.map((entry) => [entry.title, entry.page, entry.depth, entry.uri ?? null])).toEqual([
+      ["Chapter A", 0, 0, null],
+      ["Section A.1", 1, 1, null],
+      ["Deep jump", 2, 2, null],
+      ["Website", null, 0, "https://example.com/"],
+    ]);
+  });
+
+  it("keeps the file's outline when bookmarks are not edited", async () => {
+    const doc = new mupdf.PDFDocument();
+    for (let index = 0; index < 2; index += 1) doc.insertPage(-1, doc.addPage([0, 0, 300, 300], 0, doc.newDictionary(), ""));
+    doc.outlineIterator().insert({ title: "Original", uri: "#page=2", open: true });
+    const engine = await engineWith(new Uint8Array(doc.saveToBuffer("").asUint8Array()).buffer);
+    const exported = await engine.exportDocument(request({ pageOrder: [0, 1] }));
+    const outline = await (await engineWith(new Uint8Array(exported.bytes).buffer)).getOutline();
+    expect(outline.map((entry) => entry.title)).toEqual(["Original"]);
+  });
+});
+
+describe("annotation list", () => {
+  it("lists notes and markup with the text they mark", async () => {
+    const doc = new mupdf.PDFDocument();
+    const resources = doc.newDictionary();
+    const fonts = doc.newDictionary();
+    fonts.put("F1", doc.addSimpleFont(new mupdf.Font("Helvetica")));
+    resources.put("Font", fonts);
+    doc.insertPage(-1, doc.addPage([0, 0, 400, 400], 0, resources, "BT /F1 14 Tf 40 340 Td (Important sentence here) Tj ET BT /F1 14 Tf 40 300 Td (Other line) Tj ET"));
+    const page = doc.loadPage(0);
+    const highlight = page.createAnnotation("Highlight");
+    highlight.setQuadPoints([[40, 46, 210, 46, 40, 64, 210, 64]]);
+    highlight.setAuthor("Ada");
+    highlight.setContents("Check this");
+    highlight.setColor([1, 1, 0]);
+    highlight.update();
+    const note = page.createAnnotation("Text");
+    note.setRect([300, 300, 320, 320]);
+    note.setContents("A sticky note");
+    note.update();
+    const link = page.createLink([40, 100, 100, 110], "https://example.com");
+    void link;
+    const engine = await engineWith(new Uint8Array(doc.saveToBuffer("").asUint8Array()).buffer);
+    const found = await engine.listAnnotations();
+    expect(found.map((item) => [item.type, item.text, item.comment, item.author, item.color])).toEqual([
+      ["Highlight", "Important sentence here", "Check this", "Ada", "#ffff00"],
+      ["Text", "", "A sticky note", "", expect.any(String)],
+    ]);
+    expect(found[0]!.y).toBeCloseTo(46 / 400, 1);
+  });
+});

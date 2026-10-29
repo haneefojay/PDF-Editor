@@ -2638,3 +2638,207 @@ span.scanIcon {
   background: #000c;
   color: #fff;
 }
+
+/* Read aloud and auto-scroll */
+.readingHighlight {
+  fill: #3a8dff40;
+  stroke: #2f7ae5;
+  stroke-width: 0.0015;
+  rx: 0.002;
+  pointer-events: none;
+}
+.readingBar {
+  position: fixed;
+  left: 50%;
+  bottom: 64px;
+  transform: translateX(-50%);
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(100vw - 24px);
+  padding: 6px 8px 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 99px;
+  background: var(--raised);
+  box-shadow: 0 8px 28px #0003;
+}
+.readingBar select {
+  min-height: 34px;
+  max-width: 180px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+}
+.readingBar .primaryRound {
+  background: var(--accent);
+  color: #fff;
+  border-radius: 50%;
+}
+.readingBar .primaryRound:hover {
+  background: var(--accent-strong);
+}
+.readingStatus {
+  min-width: 90px;
+  font-size: 13px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.readingSpeed {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.readingIcon {
+  width: 18px;
+  color: var(--muted);
+}
+.app.phone .readingBar {
+  bottom: calc(76px + env(safe-area-inset-bottom));
+  width: calc(100vw - 24px);
+  gap: 2px;
+}
+.app.phone .readingStatus {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+}
+.app.phone .readingSpeed {
+  flex: 1;
+  min-width: 0;
+}
+.app.phone .readingSpeed > span {
+  display: none;
+}
+.app.phone .readingSpeed input {
+  width: 100%;
+}
+.app.phone .readingBar .voiceSelect {
+  display: none;
+}
+
+.outlineTools {
+  display: flex;
+  gap: 6px;
+  padding: 0 4px 8px;
+}
+.outlineTools button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--raised);
+  color: var(--text);
+  font-size: 13px;
+}
+.outlineTools button svg {
+  width: 15px;
+}
+.outlineTools button[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.outlineEdit {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 4px;
+}
+.outlineEdit input {
+  flex: 1;
+  min-width: 0;
+  min-height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+.outlineEdit .iconButton {
+  width: 28px;
+  height: 28px;
+}
+.outlineEdit .iconButton svg {
+  width: 15px;
+}
+
+.reviewGroup {
+  margin: 14px 2px 6px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.fileAnnotation .reviewJump {
+  width: 100%;
+}
+.swatch {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin-right: 6px;
+  border-radius: 2px;
+  vertical-align: 0;
+}
+
+/* AI assistant */
+.aiNote {
+  margin: 10px 0 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+.aiAdvanced {
+  margin: 10px 0;
+  font-size: 13px;
+}
+.aiAdvanced summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+.aiAdvanced label {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+}
+.aiResult {
+  margin-top: 12px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+.aiStatus {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.aiOutput {
+  max-height: 46vh;
+  overflow: auto;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--raised);
+  white-space: pre-wrap;
+  line-height: 1.5;
+  font-size: 14px;
+}
+.aiActions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}

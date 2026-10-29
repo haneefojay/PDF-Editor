@@ -51,6 +51,11 @@ import {
   Lock,
   Maximize,
   Moon,
+  Volume2,
+  BookmarkPlus,
+  IndentDecrease,
+  IndentIncrease,
+  ChevronsDown,
   Merge,
   MessageSquareText,
   MousePointer2,
@@ -69,6 +74,7 @@ import {
   ScanText,
   Search,
   SendToBack,
+  Sparkles,
   Shapes,
   ShieldCheck,
   Signature,
@@ -82,6 +88,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
+import type { Bookmark } from "@paperless/editor-core";
 import {
   createPdfEngine,
   PASSWORD_INCORRECT,
@@ -89,6 +96,7 @@ import {
   type AppendOperation,
   type AppendResult,
   type ImagePageSize,
+  type FileAnnotation,
   type FormField,
   type OutlineEntry,
   type PageLink,
@@ -123,6 +131,9 @@ import { layoutOverlays } from "./layout";
 import { findParagraph, reflowWidth } from "./paragraphs";
 import { createZip, describeGroup, parseRanges, splitEvery } from "./split";
 import { ScanSession, type ScanResult } from "./scan/ScanSession";
+import { AutoScrollBar, ReadAloudBar } from "./ReadingBar";
+import { AiAssistant } from "./AiAssistant";
+import { sentencesOf, type Box, type Sentence } from "./readAloud";
 import { PAGE_SIZES, mapCrop, mapOverlay, mmToPoints, pointsToMm, presetOf, targetSize, type Orientation, type PageSizePreset } from "./pageSize";
 
 type Engine = ReturnType<typeof createPdfEngine>;
@@ -150,6 +161,12 @@ const commonFonts = ["Helvetica", "Arial", "Calibri", "Times New Roman", "Georgi
 const formatBytes = (bytes: number) =>
   bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 const baseName = (name: string) => name.replace(/\.pdf$/i, "");
+const ANNOTATION_LABELS: Record<string, string> = {
+  Text: "Note", FreeText: "Text box", Highlight: "Highlight", Underline: "Underline", StrikeOut: "Strikeout", Squiggly: "Squiggly",
+  Ink: "Drawing", Square: "Rectangle", Circle: "Ellipse", Line: "Line", Polygon: "Polygon", PolyLine: "Polyline", Stamp: "Stamp",
+  FileAttachment: "Attachment", Caret: "Insertion", Sound: "Sound",
+};
+const annotationLabel = (type: string) => ANNOTATION_LABELS[type] ?? type;
 const OPENABLE = "application/pdf,.pdf,.docx,.xlsx,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 const officeKind = (name: string) => {
   const extension = name.toLowerCase().split(".").pop() ?? "";
@@ -226,7 +243,7 @@ export function App() {
   const [open, setOpen] = useState<OpenDoc | null>(null);
   const [tab, setTab] = useState<TabId>("edit");
   const [dialog, setDialog] = useState<
-    null | "properties" | "forms" | "find" | "ocr" | "pages" | "layout" | "compress" | "imageCrop" | "pageImages" | "security" | "shortcuts" | "split" | "pageSize" | "convert"
+    null | "properties" | "forms" | "find" | "ocr" | "pages" | "layout" | "compress" | "imageCrop" | "pageImages" | "security" | "shortcuts" | "split" | "pageSize" | "convert" | "ai"
   >(null);
   const [convertFormat, setConvertFormat] = useState<"docx" | "xlsx" | "pptx" | "txt">("docx");
   const [convertScope, setConvertScope] = useState<"all" | "page" | "range">("all");
@@ -234,6 +251,11 @@ export function App() {
   const [scanning, setScanning] = useState<null | { at: number | null }>(null);
   const [pendingOcr, setPendingOcr] = useState<null | { sources: number[]; language: OcrLanguage }>(null);
   const scanBack = useRef<(() => boolean) | null>(null);
+  const [readingMode, setReadingMode] = useState<null | "speak" | "scroll">(null);
+  const [editingBookmarks, setEditingBookmarks] = useState(false);
+  const [focusBookmark, setFocusBookmark] = useState<string | null>(null);
+  const [readingSentence, setReadingSentence] = useState<{ source: number; boxes: Box[] } | null>(null);
+  const sourceLines = useRef(new Map<number, Promise<PositionedTextLine[]>>());
   const [splitMode, setSplitMode] = useState<"every" | "ranges">("every");
   const [splitEveryDraft, setSplitEveryDraft] = useState(1);
   const [splitRangesDraft, setSplitRangesDraft] = useState("");
@@ -319,6 +341,7 @@ export function App() {
   // Text runs and links per source page, fetched as pages come into view.
   const [pageData, setPageData] = useState<Map<number, { lines: PositionedTextLine[]; links: PageLink[]; images: PageImageBox[] }>>(new Map());
   const [outline, setOutline] = useState<OutlineEntry[]>([]);
+  const [fileAnnotations, setFileAnnotations] = useState<FileAnnotation[]>([]);
   const [railTab, setRailTab] = useState<"pages" | "outline">("pages");
   const [readingTheme, setReadingTheme] = useState<"day" | "night" | "sepia">(() => {
     try {
@@ -585,6 +608,7 @@ export function App() {
   currentBytes.current = openBytesRef;
   useEffect(() => {
     pageDataLoading.current.clear();
+    sourceLines.current.clear();
     setPageData(new Map());
     if (!openBytesRef) return;
     let active = true;
@@ -592,6 +616,10 @@ export function App() {
       .getOutline()
       .then((entries) => active && setOutline(entries))
       .catch(() => active && setOutline([]));
+    void api()
+      .listAnnotations()
+      .then((items) => active && setFileAnnotations(items))
+      .catch(() => active && setFileAnnotations([]));
     return () => {
       active = false;
     };
@@ -754,6 +782,11 @@ export function App() {
     let dispose = () => undefined;
     void registerBackHandler(() => {
       if (scanBack.current) return scanBack.current();
+      if (readingMode) {
+        setReadingMode(null);
+        setReadingSentence(null);
+        return true;
+      }
       if (passwordRequest) {
         answerPassword(null);
         return true;
@@ -782,7 +815,7 @@ export function App() {
     });
     return () => dispose();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, dialog, showComments, originalEdit, editingId, selectedId, passwordRequest, ocrRunning, closeDocument]);
+  }, [open, dialog, showComments, originalEdit, editingId, selectedId, passwordRequest, ocrRunning, closeDocument, readingMode]);
 
   const generated = useMemo(() => layoutOverlays(doc.layout, doc.pageOrder, open?.pages ?? []), [doc.layout, doc.pageOrder, open?.pages]);
   const current = useMemo(() => doc.overlays.filter((item) => item.page === sourcePage), [doc.overlays, sourcePage]);
@@ -800,6 +833,7 @@ export function App() {
     !!open &&
     (doc.overlays.length > 0 ||
       doc.layout !== null ||
+      doc.bookmarks !== null ||
       Object.values(doc.rotations).some((value) => value % 360 !== 0) ||
       Object.keys(doc.crops).length > 0 ||
       JSON.stringify(doc.metadata) !== JSON.stringify(open.initialMetadata) ||
@@ -817,6 +851,14 @@ export function App() {
     overlays: [...doc.overlays, ...generated],
     rotations: doc.rotations,
     pageOrder: overrides.pageOrder ?? doc.pageOrder,
+    // Edited bookmarks point at pages by their place in the exported file.
+    bookmarks: doc.bookmarks?.map((bookmark) => ({
+      title: bookmark.title,
+      page: bookmark.page === null ? null : (overrides.pageOrder ?? doc.pageOrder).indexOf(bookmark.page),
+      top: bookmark.top,
+      depth: bookmark.depth,
+      uri: bookmark.uri,
+    })),
     crops: doc.crops,
     metadata: doc.metadata,
     formValues: doc.formValues,
@@ -1703,6 +1745,77 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingOcr, open, ocrRunning]);
 
+  // Bookmarks: the file's outline until edited, then the document's own list.
+  const fileBookmarks = useMemo<Bookmark[]>(
+    () => outline.map((entry, index) => ({ id: `file-${index}`, title: entry.title, page: entry.page, depth: entry.depth, ...(entry.uri ? { uri: entry.uri } : {}) })),
+    [outline],
+  );
+  const bookmarks = doc.bookmarks ?? fileBookmarks;
+  const setBookmarks = (after: Bookmark[]) => execute({ type: "setBookmarks", before: doc.bookmarks, after });
+  const addBookmark = () => {
+    const id = crypto.randomUUID();
+    const position = (entry: Bookmark) => (entry.page === null ? -1 : doc.pageOrder.indexOf(entry.page));
+    // Keep the list in page order: after the last bookmark on or before this page.
+    const at = bookmarks.reduce((last, entry, index) => (position(entry) <= page ? index + 1 : last), 0);
+    const depth = at > 0 ? bookmarks[at - 1]!.depth : 0;
+    setBookmarks([...bookmarks.slice(0, at), { id, title: `Page ${page + 1}`, page: sourcePage, depth }, ...bookmarks.slice(at)]);
+    setRailTab("outline");
+    setShowRail(true);
+    setEditingBookmarks(true);
+    setFocusBookmark(id);
+  };
+  const moveBookmark = (index: number, delta: number) => {
+    const next = [...bookmarks];
+    const [moved] = next.splice(index, 1);
+    next.splice(Math.max(0, Math.min(next.length, index + delta)), 0, moved!);
+    setBookmarks(next);
+  };
+  const updateBookmark = (index: number, change: Partial<Bookmark>) => setBookmarks(bookmarks.map((entry, item) => (item === index ? { ...entry, ...change } : entry)));
+
+  /**
+   * What read aloud says for a page: the file's text minus anything erased by
+   * an edit, followed by text added on the page (including OCR text).
+   */
+  const sentencesFor = useCallback(
+    async (index: number): Promise<Sentence[]> => {
+      const source = doc.pageOrder[index];
+      if (source === undefined) return [];
+      let lines = sourceLines.current.get(source);
+      if (!lines) {
+        lines = api().extractTextLines(source);
+        sourceLines.current.set(source, lines);
+      }
+      const onPage = doc.overlays.filter((overlay) => overlay.page === source);
+      const erased = onPage.filter((overlay) => overlay.kind === "redact");
+      const kept = (await lines).filter((line) => {
+        const cx = line.x + line.width / 2;
+        const cy = line.y + line.height / 2;
+        return !erased.some((box) => box.kind === "redact" && cx >= box.x && cx <= box.x + box.width && cy >= box.y && cy <= box.y + box.height);
+      });
+      const added = onPage
+        .filter((overlay): overlay is TextOverlay => overlay.kind === "text" && overlay.text.trim() !== "")
+        .sort((a, b) => a.y - b.y || a.x - b.x)
+        .map((overlay, order): PositionedTextLine => ({ ...overlay, id: overlay.id, text: overlay.text.replace(/\n/g, " "), baseline: overlay.y + overlay.height, block: 100_000 + order, line: 100_000 + order, fontName: overlay.fontName ?? overlay.fontFamily }));
+      return sentencesOf([...kept, ...added]);
+    },
+    [doc.pageOrder, doc.overlays],
+  );
+  const showSentence = useCallback(
+    (index: number, sentence: Sentence | null) => {
+      const source = doc.pageOrder[index];
+      if (!sentence || source === undefined) {
+        setReadingSentence(null);
+        return;
+      }
+      setReadingSentence({ source, boxes: sentence.boxes });
+      const bottom = Math.max(...sentence.boxes.map((box) => box.y + box.height));
+      viewRef.current?.reveal(index, sentence.top, bottom);
+      viewRef.current?.markCurrent(index);
+      setPage(index);
+    },
+    [doc.pageOrder, setPage],
+  );
+
   const finishScan = async (result: ScanResult, at: number | null) => {
     setScanning(null);
     const language = result.ocr ? (result.language as OcrLanguage) : undefined;
@@ -2108,6 +2221,10 @@ export function App() {
   const ocrText = doc.overlays.filter((overlay): overlay is TextOverlay => overlay.kind === "text" && Boolean(overlay.ocrSource));
   const lowConfidenceOcr = ocrText.filter((overlay) => (overlay.ocrConfidence ?? 100) < confidenceThreshold);
   const reviewOverlays = doc.overlays.filter(isReviewOverlay);
+  // Annotations from the file, on pages still in the document, in page order.
+  const fileInDocument = fileAnnotations
+    .filter((item) => doc.pageOrder.includes(item.page))
+    .sort((a, b) => doc.pageOrder.indexOf(a.page) - doc.pageOrder.indexOf(b.page) || a.y - b.y);
   const filteredReviews = reviewOverlays.filter((overlay) => commentFilter === "all" || (commentFilter === "resolved" ? overlay.resolved : !overlay.resolved));
   const fontOptions = Array.from(new Set([...textLines.map((line) => line.fontName), ...current.filter((item): item is TextOverlay => item.kind === "text").map((item) => item.fontName || item.fontFamily), ...commonFonts].filter(Boolean)));
 
@@ -2170,6 +2287,7 @@ export function App() {
         { key: "imagePages", label: "Images as pages", Icon: Images, action: () => inputs.imagePages.current?.click(), title: "Insert photos or scans as new pages" },
         { key: "merge", label: "Append PDF", Icon: FileOutput, action: () => inputs.merge.current?.click(), title: "Add another PDF at the end" },
         { key: "pageImage", label: "Page to image", Icon: ImageDown, action: () => void savePageImage(), title: "Save this page as a PNG image" },
+        { key: "bookmark", label: "Bookmark page", Icon: BookmarkPlus, action: addBookmark, title: "Add this page to the bookmarks" },
         { key: "split", label: "Split", Icon: Scissors, action: () => setDialog("split"), title: "Split into several PDFs by page ranges", disabled: doc.pageOrder.length < 2 },
         { key: "pageSize", label: "Page size", Icon: Scaling, action: () => openPageSize("page"), title: "Change the paper size, scaling the content to fit" },
         { key: "extract", label: "Extract page", Icon: FileOutput, action: () => void exportPages([sourcePage], `${baseName(open.name)}-page-${page + 1}.pdf`, `Page ${page + 1} exported.`), title: "Save this page as its own PDF" },
@@ -2191,8 +2309,11 @@ export function App() {
           title: "Change how pages look while reading (not the exported file)",
           active: readingTheme !== "day",
         },
+        { key: "readAloud", label: "Read aloud", Icon: Volume2, action: () => { setReadingMode("speak"); setTrayOpen(false); }, title: "Read the document aloud from this page", active: readingMode === "speak" },
+        { key: "autoScroll", label: "Auto-scroll", Icon: ChevronsDown, action: () => { setReadingMode("scroll"); setTrayOpen(false); }, title: "Scroll through the document hands-free", active: readingMode === "scroll" },
         { key: "print", label: "Print", Icon: Printer, action: () => void printDocument(), title: "Print with all edits (Ctrl+P)" },
         { key: "convert", label: "Convert", Icon: ArrowLeftRight, action: () => setDialog("convert"), title: "Convert to Word, Excel, PowerPoint or text" },
+        { key: "ai", label: "AI assistant", Icon: Sparkles, action: () => setDialog("ai"), title: "Optional: summarize or translate pages with Claude, using your own API key" },
         { key: "text", label: "Export text", Icon: FileText, action: () => void exportText(), title: "Save all text as a .txt file" },
         { key: "ocr", label: "OCR scan", Icon: ScanText, action: () => { setOcrProgress(""); setDialog("ocr"); }, title: "Recognise text in scanned pages" },
         { key: "security", label: "Protect", Icon: Lock, action: () => setDialog("security"), title: "Passwords, permissions and digital signatures" },
@@ -2684,26 +2805,85 @@ export function App() {
             </div>
             {railTab === "outline" && (
               <nav className="outline" aria-label="Document outline">
-                {outline.length ? (
-                  outline.map((entry, index) => (
-                    <button
-                      key={index}
-                      className="outlineEntry"
-                      style={{ paddingLeft: 8 + entry.depth * 14 }}
-                      disabled={entry.page === null && !entry.uri}
-                      onClick={() => {
-                        if (entry.page !== null) goTo(entry.page);
-                        else if (entry.uri) followLink({ x: 0, y: 0, width: 0, height: 0, uri: entry.uri });
-                        if (isPhone) setShowRail(false);
-                      }}
-                    >
-                      <span>{entry.title}</span>
-                      {entry.page !== null && <small>{doc.pageOrder.indexOf(entry.page) + 1 || "–"}</small>}
+                <div className="outlineTools">
+                  <button onClick={addBookmark} title="Bookmark the current page">
+                    <BookmarkPlus /> Add bookmark
+                  </button>
+                  {bookmarks.length > 0 && (
+                    <button aria-pressed={editingBookmarks} onClick={() => setEditingBookmarks(!editingBookmarks)}>
+                      {editingBookmarks ? "Done" : "Edit"}
                     </button>
-                  ))
+                  )}
+                </div>
+                {bookmarks.length ? (
+                  bookmarks.map((entry, index) =>
+                    editingBookmarks ? (
+                      <div key={entry.id} className="outlineEdit" style={{ paddingLeft: 4 + entry.depth * 14 }}>
+                        <input
+                          key={entry.title}
+                          aria-label={`Bookmark ${index + 1} title`}
+                          defaultValue={entry.title}
+                          autoFocus={focusBookmark === entry.id}
+                          onFocus={(event) => {
+                            if (focusBookmark === entry.id) {
+                              event.currentTarget.select();
+                              setFocusBookmark(null);
+                            }
+                          }}
+                          onBlur={(event) => {
+                            const title = event.target.value.trim();
+                            if (title && title !== entry.title) updateBookmark(index, { title });
+                            else event.target.value = entry.title;
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") event.currentTarget.blur();
+                            if (event.key === "Escape") {
+                              event.currentTarget.value = entry.title;
+                              event.currentTarget.blur();
+                            }
+                          }}
+                        />
+                        <button className="iconButton" aria-label={`Move ${entry.title} up`} disabled={!index} onClick={() => moveBookmark(index, -1)}>
+                          <ArrowUp />
+                        </button>
+                        <button className="iconButton" aria-label={`Move ${entry.title} down`} disabled={index === bookmarks.length - 1} onClick={() => moveBookmark(index, 1)}>
+                          <ArrowDown />
+                        </button>
+                        <button className="iconButton" aria-label={`Outdent ${entry.title}`} disabled={!entry.depth} onClick={() => updateBookmark(index, { depth: entry.depth - 1 })}>
+                          <IndentDecrease />
+                        </button>
+                        <button
+                          className="iconButton"
+                          aria-label={`Indent ${entry.title}`}
+                          disabled={!index || entry.depth > bookmarks[index - 1]!.depth || entry.depth >= 8}
+                          onClick={() => updateBookmark(index, { depth: entry.depth + 1 })}
+                        >
+                          <IndentIncrease />
+                        </button>
+                        <button className="iconButton" aria-label={`Delete ${entry.title}`} onClick={() => setBookmarks(bookmarks.filter((_, item) => item !== index))}>
+                          <Trash2 />
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        key={entry.id}
+                        className="outlineEntry"
+                        style={{ paddingLeft: 8 + entry.depth * 14 }}
+                        disabled={entry.page === null && !entry.uri}
+                        onClick={() => {
+                          if (entry.page !== null) goTo(entry.page, entry.top ?? 0);
+                          else if (entry.uri) followLink({ x: 0, y: 0, width: 0, height: 0, uri: entry.uri });
+                          if (isPhone) setShowRail(false);
+                        }}
+                      >
+                        <span>{entry.title}</span>
+                        {entry.page !== null && <small>{doc.pageOrder.indexOf(entry.page) + 1 || "–"}</small>}
+                      </button>
+                    ),
+                  )
                 ) : (
                   <p className="empty">
-                    <BookOpen /> This document has no outline.
+                    <BookOpen /> No bookmarks yet. Add one to jump back to this page later.
                   </p>
                 )}
               </nav>
@@ -2816,6 +2996,7 @@ export function App() {
                         selectedId={selectedId}
                         editingId={editingId}
                         highlight={searchHighlight?.sourcePage === source ? searchHighlight.rect : null}
+                        reading={readingSentence?.source === source ? readingSentence.boxes : null}
                         page={source}
                         onSelect={(id) => {
                           if (originalEdit) commitOriginalEdit(originalEdit, false);
@@ -2915,7 +3096,9 @@ export function App() {
             <header>
               <div>
                 <b>Comments</b>
-                <span>{reviewOverlays.filter((item) => !item.resolved).length} open</span>
+                <span>
+                  {reviewOverlays.filter((item) => !item.resolved).length} open{fileInDocument.length ? ` · ${fileInDocument.length} in the file` : ""}
+                </span>
               </div>
               <button className="iconButton" aria-label="Close comments" onClick={() => setShowComments(false)}>
                 <X />
@@ -2961,6 +3144,34 @@ export function App() {
                 ))
               ) : (
                 <p className="empty">{reviewOverlays.length ? "No comments match this filter." : "No comments yet. Use Highlight, Note, Stamp or Measure to start a review."}</p>
+              )}
+              {commentFilter === "all" && fileInDocument.length > 0 && (
+                <>
+                  <h3 className="reviewGroup">Already in the file ({fileInDocument.length})</h3>
+                  {fileInDocument.map((item) => (
+                    <article key={item.id} className="fileAnnotation">
+                      <button
+                        className="reviewJump"
+                        onClick={() => {
+                          goTo(item.page, item.y);
+                          setSearchHighlight({ sourcePage: item.page, rect: { x: item.x, y: item.y, width: item.width, height: item.height } });
+                          if (isPhone) setShowComments(false);
+                        }}
+                      >
+                        <span>
+                          {item.color && <i className="swatch" style={{ background: item.color }} />}
+                          Page {doc.pageOrder.indexOf(item.page) + 1} · {annotationLabel(item.type)}
+                        </span>
+                        <b>{item.text || item.comment || annotationLabel(item.type)}</b>
+                        {item.text && item.comment && <p>{item.comment}</p>}
+                        <small>
+                          {item.author || "Unknown author"}
+                          {item.modified ? ` · ${new Date(item.modified).toLocaleString()}` : ""}
+                        </small>
+                      </button>
+                    </article>
+                  ))}
+                </>
               )}
             </div>
             <footer>
@@ -3666,6 +3877,17 @@ export function App() {
         </Modal>
       )}
 
+      {dialog === "ai" && (
+        <AiAssistant
+          pageCount={doc.pageOrder.length}
+          currentPage={page}
+          native={isNativePlatform}
+          textOf={async (indexes) => api().textOfBytes(await renderedExport(indexes.map((index) => doc.pageOrder[index]!)))}
+          onSave={(text, kind) => void downloadBlob(new Blob([text], { type: "text/plain" }), `${baseName(open.name)}-${kind}.txt`).then((message) => setNotice(`${message}.`))}
+          onClose={() => setDialog(null)}
+        />
+      )}
+
       {dialog === "shortcuts" && (
         <Modal title="Keyboard shortcuts" onClose={() => setDialog(null)} footer={<button className="primary" onClick={() => setDialog(null)}>Close</button>}>
           <dl className="shortcuts">
@@ -3693,6 +3915,19 @@ export function App() {
           </dl>
         </Modal>
       )}
+      {readingMode === "speak" && (
+        <ReadAloudBar
+          startPage={page}
+          pageCount={doc.pageOrder.length}
+          sentencesFor={sentencesFor}
+          onSentence={showSentence}
+          onClose={() => {
+            setReadingMode(null);
+            setReadingSentence(null);
+          }}
+        />
+      )}
+      {readingMode === "scroll" && <AutoScrollBar target={() => stageRef.current} onClose={() => setReadingMode(null)} />}
       {passwordDialog}
       {toasts}
       {scanner}

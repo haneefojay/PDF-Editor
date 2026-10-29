@@ -69,3 +69,17 @@ test("typing new text on a phone keeps the page in place", async ({ page }) => {
   await expect(page.locator(".textOverlay", { hasText: "Hello from my phone" })).toBeVisible();
   expect((await pageAt(page).boundingBox())!.x).toBeCloseTo(box.x, 0);
 });
+
+test("read aloud on a phone closes the tray and fits on one row", async ({ page }) => {
+  await openSample(page, longPdf(), "long.pdf");
+  await bottomTab(page, "Tools").tap();
+  await page.locator(".phoneDock .ribbon button", { hasText: "Read aloud" }).tap();
+  await expect(page.locator(".phoneDock .ribbon")).toHaveCount(0);
+  const bar = page.getByRole("region", { name: "Read aloud" });
+  await expect(bar).toBeVisible();
+  const box = (await bar.boundingBox())!;
+  expect(box.height).toBeLessThan(80);
+  expect(box.x + box.width).toBeLessThanOrEqual(page.viewportSize()!.width);
+  await bar.getByRole("button", { name: "Close read aloud" }).tap();
+  await expect(bar).toHaveCount(0);
+});

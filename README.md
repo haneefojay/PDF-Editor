@@ -1,6 +1,6 @@
 # Paperless PDF Editor
 
-A local-first, privacy-first PDF editor for the web and Android, licensed under AGPL-3.0. PDF bytes stay on your device; no account or backend is required.
+A local-first, privacy-first PDF editor for the web and Android, licensed under AGPL-3.0. PDF bytes stay on your device; no account or backend is required. The one exception is the optional AI assistant, which sends page text only when you set it up and press Send.
 
 ## What it does
 
@@ -8,6 +8,10 @@ A local-first, privacy-first PDF editor for the web and Android, licensed under 
 - Continuous scrolling through the whole document; only pages near the screen are rendered, so long files stay fast.
 - Navigate with the document outline (bookmarks), clickable internal and web links, thumbnails and search.
 - Night and sepia reading themes, plus full-screen reading on phones (tap the page).
+- Read aloud with the device's own speech engine, highlighting and following each sentence across pages, with speed and voice choices. Auto-scroll for hands-free reading; any touch pauses it.
+- Add, rename, nest, reorder and delete bookmarks; they are saved into the exported PDF.
+- The Comments panel also lists the notes, highlights and other annotations already in the file, and jumps to each one.
+- Optional AI assistant (web only, off by default): summarize or translate chosen pages with Claude, using your own Anthropic API key. Nothing is sent until you have turned it on, agreed to it, and pressed Send; the key is remembered only if you ask.
 
 **Edit**
 - Click existing text to change it, keeping its font, size and colour. Whole paragraphs reflow inside their original width; tables, rules and backgrounds around the text are left intact.
@@ -77,6 +81,8 @@ The unit tests in `packages/pdf-engine` build real PDFs with MuPDF and inspect w
   - `App.tsx`: document state, tools and dialogs
   - `DocumentView.tsx`: continuous, virtualized page column
   - `PageCanvas.tsx`: page interaction
+  - `readAloud.ts`, `ReadingBar.tsx`: sentence splitting, the speech adapter (browser or Android), read-aloud and auto-scroll controls
+  - `ai.ts`, `AiAssistant.tsx`: the optional AI assistant
   - `textMetrics.ts`: font-accurate text preview
   - `scan/`: page detection, perspective correction and filters, plus the scanner screen
   - `convert/`: document structure from PDF pages, and Office readers and writers (DOCX, XLSX, PPTX)

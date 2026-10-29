@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { readFile } from "node:fs/promises";
-import { colourAt, imageOnPanelPdf, inspectPdf, longPdf, PARAGRAPH_LINES, paragraphPdf, pngImage, readStoredZip, samplePdf, wordFile, excelFile, zipText } from "./fixtures";
+import { colourAt, imageOnPanelPdf, inspectPdf, longPdf, PARAGRAPH_LINES, paragraphPdf, pngImage, readStoredZip, samplePdf, wordFile, excelFile, zipText, outlineOf, annotatedPdf } from "./fixtures";
 import { clickOnPage, dragOnPage, exportPdf, fitPage, openSample, pageAt, tab, tool } from "./helpers";
 
 test("edits original text without disturbing the table around it", async ({ page }) => {
@@ -396,4 +396,221 @@ test("explains which files cannot be opened", async ({ page }) => {
   await page.goto("/");
   await page.setInputFiles('input[aria-label="Open PDF"]', { name: "deck.pptx", mimeType: "application/octet-stream", buffer: Buffer.from("x") });
   await expect(page.getByRole("alert")).toContainText("PowerPoint files can't be opened yet");
+});
+
+/** A stand-in speech engine: each utterance "ends" after a short pause. */
+const fakeSpeech = () => {
+  const spoken: string[] = [];
+  let current: { onend?: () => void; onerror?: (event: { error: string }) => void } | null = null;
+  class Utterance {
+    text: string;
+    rate = 1;
+    voice: unknown = null;
+    lang = "";
+    onend?: () => void;
+    onerror?: (event: { error: string }) => void;
+    constructor(text: string) {
+      this.text = text;
+    }
+  }
+  // The real properties are read-only accessors, so they are redefined.
+  Object.defineProperty(window, "SpeechSynthesisUtterance", { value: Utterance, configurable: true });
+  Object.defineProperty(window, "__spoken", { value: spoken, configurable: true });
+  Object.defineProperty(window, "speechSynthesis", {
+    configurable: true,
+    value: {
+      getVoices: () => [{ voiceURI: "test-voice", name: "Test voice", lang: "en-US" }, { voiceURI: "other", name: "Other voice", lang: "en-GB" }],
+      addEventListener: () => undefined,
+      resume: () => undefined,
+      speak: (utterance: Utterance) => {
+        current = utterance;
+        spoken.push(utterance.text);
+        setTimeout(() => current === utterance && utterance.onend?.(), 300);
+      },
+      cancel: () => {
+        const stopped = current;
+        current = null;
+        stopped?.onerror?.({ error: "interrupted" });
+      },
+    },
+  });
+};
+
+test("reads aloud sentence by sentence, following the text onto the next page", async ({ page }) => {
+  await page.addInitScript(fakeSpeech);
+  await openSample(page, longPdf(), "long.pdf");
+  await tab(page, "Tools");
+  await tool(page, "Read aloud");
+  const bar = page.getByRole("region", { name: "Read aloud" });
+  await expect(page.locator(".readingHighlight").first()).toBeVisible();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __spoken: string[] }).__spoken[0])).toContain("Chapter 1");
+  // It moves on to page 2 by itself and scrolls it into view.
+  await expect(bar).toContainText("Page 2 of 12", { timeout: 20_000 });
+  await expect(pageAt(page, 1)).toBeInViewport();
+  await bar.getByRole("button", { name: "Pause reading" }).click();
+  const count = await page.evaluate(() => (window as unknown as { __spoken: string[] }).__spoken.length);
+  await page.waitForTimeout(300);
+  expect(await page.evaluate(() => (window as unknown as { __spoken: string[] }).__spoken.length)).toBe(count);
+  await expect(bar.getByRole("combobox", { name: "Voice" })).toContainText("Other voice");
+  await bar.getByRole("button", { name: "Next sentence" }).click();
+  await expect(page.locator(".readingHighlight").first()).toBeVisible();
+  await bar.getByRole("button", { name: "Start reading" }).click();
+  await expect(bar.getByRole("button", { name: "Pause reading" })).toBeVisible();
+  await bar.getByRole("button", { name: "Close read aloud" }).click();
+  await expect(page.locator(".readingHighlight")).toHaveCount(0);
+});
+
+test("auto-scrolls and pauses", async ({ page }) => {
+  await openSample(page, longPdf(), "long.pdf");
+  await tab(page, "Tools");
+  await tool(page, "Auto-scroll");
+  const stage = page.locator(".stage");
+  await expect.poll(() => stage.evaluate((element) => element.scrollTop), { timeout: 10_000 }).toBeGreaterThan(40);
+  const bar = page.getByRole("region", { name: "Auto-scroll" });
+  await bar.getByRole("button", { name: "Pause scrolling" }).click();
+  const stopped = await stage.evaluate((element) => element.scrollTop);
+  await page.waitForTimeout(400);
+  expect(await stage.evaluate((element) => element.scrollTop)).toBe(stopped);
+  await bar.getByRole("button", { name: "Close auto-scroll" }).click();
+  await expect(bar).toHaveCount(0);
+});
+
+test("adds, renames, nests and reorders bookmarks, and exports them", async ({ page }) => {
+  await openSample(page);
+  await tab(page, "Pages");
+  await tool(page, "Bookmark page");
+  const outline = page.getByRole("navigation", { name: "Document outline" });
+  const first = outline.getByRole("textbox", { name: "Bookmark 1 title" });
+  await expect(first).toBeFocused();
+  await page.keyboard.type("Summary");
+  await page.keyboard.press("Enter");
+
+  await page.locator(".rail").getByRole("tab", { name: "Thumbnails" }).click();
+  await page.locator(".rail .thumb").nth(2).click();
+  await tab(page, "Pages");
+  await tool(page, "Bookmark page");
+  await expect(outline.getByRole("textbox", { name: "Bookmark 2 title" })).toBeFocused();
+  await page.keyboard.type("Appendix");
+  await page.keyboard.press("Enter");
+  await outline.getByRole("button", { name: "Indent Appendix" }).click();
+  await outline.getByRole("button", { name: "Done" }).click();
+  await expect(outline.locator(".outlineEntry")).toHaveText(["Summary1", "Appendix3"]);
+
+  await outline.getByRole("button", { name: /Summary/ }).click();
+  await expect(pageAt(page, 0)).toBeInViewport();
+
+  expect(outlineOf(await exportPdf(page))).toEqual([
+    ["Summary", 0, 0],
+    ["Appendix", 2, 1],
+  ]);
+
+  // Undo takes back the last change (the indent), keeping the rest.
+  await outline.getByRole("button", { name: "Edit" }).click();
+  await outline.getByRole("button", { name: "Move Appendix up" }).click();
+  expect(outlineOf(await exportPdf(page)).map((row) => row[0])).toEqual(["Appendix", "Summary"]);
+  await page.getByRole("button", { name: "Undo" }).click();
+  expect(outlineOf(await exportPdf(page)).map((row) => row[0])).toEqual(["Summary", "Appendix"]);
+});
+
+test("lists the annotations already in the file and jumps to them", async ({ page }) => {
+  await openSample(page, annotatedPdf(), "annotated.pdf");
+  await tab(page, "Comment");
+  await tool(page, "All comments");
+  const panel = page.getByRole("complementary", { name: "Comments" });
+  await expect(panel).toContainText("2 in the file");
+  await expect(panel.getByRole("heading", { name: "Already in the file (2)" })).toBeVisible();
+  // Listed top to bottom: the note sits above the highlight.
+  await expect(panel.locator(".fileAnnotation").first()).toContainText("Signed copy is in the drawer.");
+  await expect(panel.locator(".fileAnnotation").first()).not.toContainText("1969");
+  const highlight = panel.locator(".fileAnnotation").nth(1);
+  await expect(highlight).toContainText("Page 3 · Highlight");
+  await expect(highlight).toContainText("The contract renews every year in March.");
+  await expect(highlight).toContainText("Is this still right?");
+  await expect(highlight).toContainText("Lee");
+  await highlight.getByRole("button").click();
+  await expect(pageAt(page, 2)).toBeInViewport();
+  await expect(pageAt(page, 2).locator(".searchHighlight")).toHaveCount(1);
+});
+
+/** Answers Messages API calls with a streamed reply, recording each request. */
+async function mockClaude(page: import("@playwright/test").Page, reply: (body: { messages: { content: string }[] }) => string, status = 200) {
+  const requests: { headers: Record<string, string>; body: Record<string, unknown> }[] = [];
+  await page.route("https://api.anthropic.com/**", async (route) => {
+    const request = route.request();
+    const cors = { "access-control-allow-origin": "*", "access-control-allow-headers": "*", "access-control-allow-methods": "POST, OPTIONS" };
+    if (request.method() === "OPTIONS") return route.fulfill({ status: 204, headers: cors });
+    const body = request.postDataJSON() as { messages: { content: string }[] };
+    requests.push({ headers: await request.allHeaders(), body });
+    if (status !== 200)
+      return route.fulfill({ status, headers: { ...cors, "content-type": "application/json" }, body: JSON.stringify({ type: "error", error: { type: "authentication_error", message: "invalid x-api-key" } }) });
+    const text = reply(body);
+    const events = [
+      ["message_start", { type: "message_start", message: { id: "msg_test", type: "message", role: "assistant", model: "claude-opus-5-5", content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 1 } } }],
+      ["content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }],
+      ...text.split(/(?<= )/).map((part) => ["content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: part } }]),
+      ["content_block_stop", { type: "content_block_stop", index: 0 }],
+      ["message_delta", { type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 5 } }],
+      ["message_stop", { type: "message_stop" }],
+    ];
+    await route.fulfill({ status: 200, headers: { ...cors, "content-type": "text/event-stream" }, body: events.map(([name, data]) => `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`).join("") });
+  });
+  return requests;
+}
+
+test("AI assistant is off until set up, then summarizes and translates with the user's key", async ({ page }) => {
+  const requests = await mockClaude(page, (body) => (body.messages[0]!.content.includes("Quarterly Report") ? "The board report shows steady revenue growth." : "Página traducida."));
+  await openSample(page);
+  await tab(page, "Tools");
+  await tool(page, "AI assistant");
+  const setup = page.getByRole("dialog", { name: "Set up the AI assistant" });
+  const turnOn = setup.getByRole("button", { name: "Turn on" });
+  await expect(turnOn).toBeDisabled();
+  await setup.getByLabel("Anthropic API key").fill("sk-ant-test-key");
+  await expect(turnOn).toBeDisabled();
+  await setup.getByRole("checkbox", { name: /I understand/ }).check();
+  await turnOn.click();
+  expect(requests).toHaveLength(0);
+
+  const assistant = page.getByRole("dialog", { name: "AI assistant" });
+  await expect(assistant).toContainText("api.anthropic.com");
+  await assistant.getByRole("button", { name: "Send 1 page" }).click();
+  await expect(assistant.locator(".aiOutput")).toHaveText("The board report shows steady revenue growth.");
+  await expect(assistant.getByRole("status")).toHaveText(/Done/);
+  expect(requests).toHaveLength(1);
+  const [summary] = requests;
+  // The SDK sends the key as a bearer token.
+  expect(summary!.headers["authorization"]).toBe("Bearer sk-ant-test-key");
+  expect(summary!.headers["anthropic-dangerous-direct-browser-access"]).toBe("true");
+  expect(summary!.headers["anthropic-beta"]).toContain("server-side-fallback-2026-07-01");
+  expect(summary!.body).toMatchObject({ model: "claude-opus-5-5", fallbacks: "default", stream: true });
+  expect(summary!.body.messages).toEqual([{ role: "user", content: expect.stringContaining("Quarterly Report") }]);
+
+  // Translation goes page by page.
+  await assistant.getByRole("radio", { name: "Translate" }).click();
+  await assistant.getByRole("combobox", { name: /^Into/ }).selectOption("Spanish");
+  await assistant.getByRole("combobox", { name: /^Pages/ }).selectOption("range");
+  await assistant.getByRole("textbox", { name: "Pages to send" }).fill("2-3");
+  await assistant.getByRole("button", { name: "Send 2 pages" }).click();
+  await expect(assistant.locator(".aiOutput")).toHaveText("Page 2\nPágina traducida.\n\nPage 3\nPágina traducida.");
+  expect(requests).toHaveLength(3);
+  expect(String(requests[1]!.body.system)).toContain("into Spanish");
+  expect(requests[1]!.body.messages).toEqual([{ role: "user", content: expect.stringContaining("Page two") }]);
+});
+
+test("AI assistant explains a rejected key and can be turned off", async ({ page }) => {
+  const requests = await mockClaude(page, () => "", 401);
+  await openSample(page);
+  await tab(page, "Tools");
+  await tool(page, "AI assistant");
+  const setup = page.getByRole("dialog", { name: "Set up the AI assistant" });
+  await setup.getByLabel("Anthropic API key").fill("sk-ant-wrong");
+  await setup.getByRole("checkbox", { name: /I understand/ }).check();
+  await setup.getByRole("button", { name: "Turn on" }).click();
+  const assistant = page.getByRole("dialog", { name: "AI assistant" });
+  await assistant.getByRole("button", { name: "Send 1 page" }).click();
+  await expect(assistant.getByRole("status")).toContainText("The API key was not accepted");
+  expect(requests.length).toBeGreaterThan(0);
+  await assistant.getByRole("button", { name: "AI settings" }).click();
+  await page.getByRole("button", { name: "Turn off and forget key" }).click();
+  await expect(page.getByLabel("Anthropic API key")).toHaveValue("");
 });

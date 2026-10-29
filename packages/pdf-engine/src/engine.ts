@@ -16,6 +16,7 @@ import type {
   PageLayout,
   ExportOverlay,
   ExportRequest,
+  FileAnnotation,
   FormField,
   OutlineEntry,
   PageImage,
@@ -1342,6 +1343,7 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
       if (!order.length || new Set(order).size !== order.length || order.some((item) => !valid(item)))
         throw new Error("Export validation failed: page order is invalid.");
       rearrangePages(target, order);
+      if (request.bookmarks) writeOutline(target, request.bookmarks);
 
       let options =
         request.compression === "original"
@@ -1510,6 +1512,67 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
     layout.tables = tablesOf("table-hunt,vectors", true);
     page.destroy();
     return layout;
+  };
+
+  /** Writes a fresh outline: nested entries pointing at pages or web links. */
+  const writeOutline = (target: Mupdf.PDFDocument, bookmarks: NonNullable<ExportRequest["bookmarks"]>) => {
+    const root = target.getTrailer().get("Root").resolve();
+    root.delete("Outlines");
+    const count = target.countPages();
+    const usable = bookmarks.filter((item) => item.title.trim() && (item.uri || (item.page !== null && item.page >= 0 && item.page < count)));
+    if (!usable.length) return;
+    type Node = { object: Mupdf.PDFObject; children: Node[] };
+    const outlines = target.addObject(target.newDictionary());
+    outlines.put("Type", target.newName("Outlines"));
+    const top: Node = { object: outlines, children: [] };
+    const stack: Node[] = [top];
+    for (const item of usable) {
+      // A level can only go one deeper than the entry before it.
+      const depth = Math.min(item.depth, stack.length - 1);
+      stack.length = depth + 1;
+      const parent = stack[depth]!;
+      const entry = target.addObject(target.newDictionary());
+      entry.put("Title", target.newString(item.title.trim()));
+      entry.put("Parent", parent.object);
+      if (item.uri) {
+        const action = target.newDictionary();
+        action.put("S", target.newName("URI"));
+        action.put("URI", target.newString(item.uri));
+        entry.put("A", action);
+      } else {
+        const page = target.loadPage(item.page!);
+        const box = page.getObject().getInheritable("MediaBox");
+        const destination = target.newArray();
+        destination.push(page.getObject());
+        if (item.top !== undefined && box.isArray()) {
+          destination.push(target.newName("XYZ"));
+          destination.push(target.newNull());
+          destination.push(box.get(3).asNumber() - item.top * (box.get(3).asNumber() - box.get(1).asNumber()));
+          destination.push(target.newNull());
+        } else destination.push(target.newName("Fit"));
+        entry.put("Dest", destination);
+        page.destroy();
+      }
+      const node: Node = { object: entry, children: [] };
+      parent.children.push(node);
+      stack.push(node);
+    }
+    const link = (node: Node): number => {
+      node.children.forEach((child, index) => {
+        if (index) child.object.put("Prev", node.children[index - 1]!.object);
+        if (index < node.children.length - 1) child.object.put("Next", node.children[index + 1]!.object);
+      });
+      if (node.children.length) {
+        node.object.put("First", node.children[0]!.object);
+        node.object.put("Last", node.children.at(-1)!.object);
+      }
+      // Entries start open, so their count is every entry below them.
+      const total = node.children.reduce((sum, child) => sum + 1 + link(child), 0);
+      if (total) node.object.put("Count", total);
+      return total;
+    };
+    link(top);
+    root.put("Outlines", outlines);
   };
 
   /**
@@ -1860,6 +1923,73 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
       structured.destroy();
       page.destroy();
       return images;
+    },
+
+    async listAnnotations() {
+      const target = requireDoc();
+      const found: FileAnnotation[] = [];
+      const skip = new Set(["Widget", "Link", "Popup", "PrinterMark", "TrapNet", "Watermark", "Screen", "3D", "Redact"]);
+      const markup = new Set(["Highlight", "Underline", "StrikeOut", "Squiggly"]);
+      for (let index = 0; index < target.countPages(); index += 1) {
+        const page = target.loadPage(index);
+        const annotations = page.getAnnotations().filter((annotation) => !skip.has(annotation.getType()));
+        if (!annotations.length) {
+          page.destroy();
+          continue;
+        }
+        const bounds = page.getBounds();
+        const width = bounds[2] - bounds[0];
+        const height = bounds[3] - bounds[1];
+        // Text under markup comes from the characters inside its rectangle.
+        const chars: { char: string; x: number; y: number; line: number }[] = [];
+        if (annotations.some((annotation) => markup.has(annotation.getType()))) {
+          const structured = page.toStructuredText("");
+          let line = 0;
+          structured.walk({
+            beginLine: () => (line += 1),
+            onChar: (char, _origin, _font, _size, quad) => chars.push({ char, x: (quad[0] + quad[6]) / 2, y: (quad[1] + quad[7]) / 2, line }),
+          });
+          structured.destroy();
+        }
+        annotations.forEach((annotation, position) => {
+          const [x0, y0, x1, y1] = annotation.getBounds();
+          const type = annotation.getType();
+          let text = "";
+          if (markup.has(type)) {
+            let lastLine = -1;
+            for (const item of chars)
+              if (item.x >= x0 - 1 && item.x <= x1 + 1 && item.y >= y0 - 2 && item.y <= y1 + 2) {
+                text += (lastLine >= 0 && item.line !== lastLine && !text.endsWith(" ") ? " " : "") + item.char;
+                lastLine = item.line;
+              }
+          }
+          const color = annotation.getColor();
+          let modified: string | null = null;
+          try {
+            const date = annotation.getModificationDate();
+            // Annotations without a date report the epoch.
+            modified = date && !Number.isNaN(date.getTime()) && date.getUTCFullYear() >= 1990 ? date.toISOString() : null;
+          } catch {
+            modified = null;
+          }
+          found.push({
+            id: `${index}-${position}`,
+            page: index,
+            type,
+            text: text.replace(/\s+/g, " ").trim(),
+            comment: annotation.getContents() ?? "",
+            author: annotation.getAuthor() ?? "",
+            modified,
+            color: color && color.length ? extractedColor(color as Mupdf.Color) : null,
+            x: (x0 - bounds[0]) / width,
+            y: (y0 - bounds[1]) / height,
+            width: (x1 - x0) / width,
+            height: (y1 - y0) / height,
+          });
+        });
+        page.destroy();
+      }
+      return found;
     },
 
     async getOutline() {
