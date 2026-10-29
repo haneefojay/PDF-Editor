@@ -7,6 +7,7 @@ import {
   useState,
   type ChangeEvent,
   type DragEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
   type TouchEvent as ReactTouchEvent,
 } from "react";
@@ -19,6 +20,7 @@ import {
   ArrowUp,
   ArrowUpRight,
   Bold,
+  BookOpen,
   BringToFront,
   ChevronLeft,
   ChevronRight,
@@ -26,6 +28,7 @@ import {
   Crop,
   Download,
   Eraser,
+  EyeOff,
   FileImage,
   FileKey2,
   FileOutput,
@@ -43,6 +46,7 @@ import {
   ListChecks,
   Lock,
   Maximize,
+  Moon,
   Merge,
   MessageSquareText,
   MousePointer2,
@@ -56,6 +60,8 @@ import {
   RotateCcw,
   RotateCw,
   Ruler,
+  Scaling,
+  Scissors,
   ScanText,
   Search,
   SendToBack,
@@ -67,6 +73,7 @@ import {
   Type,
   Underline,
   Undo2,
+  Wrench,
   X,
   ZoomIn,
   ZoomOut,
@@ -76,7 +83,10 @@ import {
   PASSWORD_INCORRECT,
   PASSWORD_REQUIRED,
   type AppendOperation,
+  type AppendResult,
   type FormField,
+  type OutlineEntry,
+  type PageLink,
   type PageImage,
   type PageInfo,
   type PdfMetadata,
@@ -93,15 +103,20 @@ import {
 } from "@paperless/editor-core";
 import { deleteProject, listProjects, loadProject, saveProject, type ProjectSummary } from "./persistence";
 import { MAX_ZOOM, MIN_ZOOM, useEditor } from "./store";
-import { configureNativeUi, isNativePlatform, registerBackHandler, savePdf } from "./platform";
+import { configureNativeUi, isNativePlatform, registerBackHandler, saveFile, savePdf } from "./platform";
 import { createOcrRecognizer, ocrLanguages, type OcrLanguage, type ScanEnhancement } from "./ocr";
 import { signPdfWithCertificate } from "./digital-signature";
+import { DocumentView, type DocumentViewHandle } from "./DocumentView";
 import { PageCanvas, type CanvasSettings, type MarkupKind, type OriginalEdit, type ShapeKind } from "./PageCanvas";
 import { exportFontName, fitTextBox, fontCategory, layoutStyled, topForBaseline, usePreviewFonts } from "./textMetrics";
 import { Modal, NumberField, Toast } from "./ui";
+import { useMediaQuery } from "./hooks";
 import { dataUrlToBlob, downloadBlob, readAsDataUrl } from "./files";
 import { boundsOf } from "./geometry";
 import { layoutOverlays } from "./layout";
+import { findParagraph, reflowWidth } from "./paragraphs";
+import { createZip, describeGroup, parseRanges, splitEvery } from "./split";
+import { PAGE_SIZES, mapCrop, mapOverlay, mmToPoints, pointsToMm, presetOf, targetSize, type Orientation, type PageSizePreset } from "./pageSize";
 
 type Engine = ReturnType<typeof createPdfEngine>;
 type OpenDoc = {
@@ -117,6 +132,7 @@ type OpenDoc = {
 };
 type FindResult = { sourcePage: number; line: PositionedTextLine; overlayId?: string };
 type TabId = "edit" | "comment" | "sign" | "pages" | "tools";
+type PageImageBox = Omit<PageImage, "dataUrl">;
 type ReviewOverlay = Extract<Overlay, { kind: "markup" | "note" | "stamp" | "attachment" | "measurement" }>;
 type TextOverlay = Extract<Overlay, { kind: "text" }>;
 type PasswordRequest = { name: string; incorrect: boolean; resolve: (password: string | null) => void };
@@ -152,7 +168,7 @@ const pngUrl = (png: Uint8Array) => {
 };
 const isTyping = (target: EventTarget | null) =>
   target instanceof HTMLElement && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName));
-const toolShortcuts: Partial<Record<string, Tool>> = { v: "select", t: "text", d: "ink", h: "markup", n: "note", r: "shape", l: "line", s: "signature" };
+const toolShortcuts: Partial<Record<string, Tool>> = { v: "select", t: "text", d: "ink", e: "eraser", h: "markup", n: "note", r: "shape", l: "line", s: "signature" };
 const shortcutFor = (tool: Tool) => Object.entries(toolShortcuts).find(([, value]) => value === tool)?.[0]?.toUpperCase();
 
 function Thumbnail({ source, rotation, url, onVisible }: { source: number; rotation: number; url?: string; onVisible: (source: number) => void }) {
@@ -197,8 +213,18 @@ export function App() {
   const [open, setOpen] = useState<OpenDoc | null>(null);
   const [tab, setTab] = useState<TabId>("edit");
   const [dialog, setDialog] = useState<
-    null | "properties" | "forms" | "find" | "ocr" | "pages" | "layout" | "compress" | "imageCrop" | "pageImages" | "security" | "shortcuts"
+    null | "properties" | "forms" | "find" | "ocr" | "pages" | "layout" | "compress" | "imageCrop" | "pageImages" | "security" | "shortcuts" | "split" | "pageSize"
   >(null);
+  const [splitMode, setSplitMode] = useState<"every" | "ranges">("every");
+  const [splitEveryDraft, setSplitEveryDraft] = useState(1);
+  const [splitRangesDraft, setSplitRangesDraft] = useState("");
+  const [sizeDraft, setSizeDraft] = useState<{ scope: "page" | "selected" | "all"; preset: PageSizePreset; orientation: Orientation; widthMm: number; heightMm: number }>({
+    scope: "page",
+    preset: "A4",
+    orientation: "keep",
+    widthMm: 210,
+    heightMm: 297,
+  });
   const [showComments, setShowComments] = useState(false);
   const [showRail, setShowRail] = useState(() => window.innerWidth > 760);
   const [passwordRequest, setPasswordRequest] = useState<PasswordRequest | null>(null);
@@ -218,7 +244,6 @@ export function App() {
   const [confidenceThreshold, setConfidenceThreshold] = useState(75);
   const [metadataDraft, setMetadataDraft] = useState<PdfMetadata>({ title: "", author: "", subject: "", keywords: "" });
   const [recent, setRecent] = useState<ProjectSummary[]>([]);
-  const [image, setImage] = useState<{ source: number; url: string } | null>(null);
   const [thumbs, setThumbs] = useState<Map<number, string>>(new Map());
   const [busy, setBusy] = useState("");
   const [saving, setSaving] = useState(false);
@@ -230,6 +255,7 @@ export function App() {
   const [fit, setFit] = useState<"width" | "page" | null>("width");
   const [settings, setSettings] = useState<CanvasSettings>({
     shapeKind: "rectangle",
+    penStyle: "pen",
     drawColor: "#d64b35",
     fillColor: null,
     strokeWidth: 2,
@@ -271,7 +297,25 @@ export function App() {
   const [signatureContact, setSignatureContact] = useState("");
   const [security, setSecurity] = useState({ userPassword: "", ownerPassword: "", allowPrint: true, allowCopy: true, allowEdit: false, allowAnnotate: true, sanitizeMetadata: false, flattenForms: false });
   const [lastAudit, setLastAudit] = useState<{ generatedAt: string; document: string; pages: number[]; areas: number; verified: boolean } | null>(null);
-  const [textLines, setTextLines] = useState<PositionedTextLine[]>([]);
+  // Text runs and links per source page, fetched as pages come into view.
+  const [pageData, setPageData] = useState<Map<number, { lines: PositionedTextLine[]; links: PageLink[]; images: PageImageBox[] }>>(new Map());
+  const [outline, setOutline] = useState<OutlineEntry[]>([]);
+  const [railTab, setRailTab] = useState<"pages" | "outline">("pages");
+  const [readingTheme, setReadingTheme] = useState<"day" | "night" | "sepia">(() => {
+    try {
+      const saved = localStorage.getItem("paperless:reading-theme");
+      return saved === "night" || saved === "sepia" ? saved : "day";
+    } catch {
+      return "day";
+    }
+  });
+  const isPhone = useMediaQuery("(max-width: 760px)");
+  const [trayOpen, setTrayOpen] = useState(false);
+  const [immersive, setImmersive] = useState(false);
+  // The phone page indicator shows while scrolling, then fades away.
+  const [pillShown, setPillShown] = useState(true);
+  const viewRef = useRef<DocumentViewHandle>(null);
+  const [stageElement, setStageElement] = useState<HTMLDivElement | null>(null);
   const [originalEdit, setOriginalEdit] = useState<OriginalEdit | null>(null);
   const { tool, zoom, page, doc, undo, redo, setTool, setZoom, setPage, execute, undoOnce, redoOnce, reset, hydrate } = useEditor();
 
@@ -330,7 +374,8 @@ export function App() {
   const resetView = () => {
     thumbQueue.current.generation += 1;
     thumbQueue.current.pending.clear();
-    setTextLines([]);
+    setPageData(new Map());
+    setOutline([]);
     setSelectedId(null);
     setEditingId(null);
     setOriginalEdit(null);
@@ -339,10 +384,6 @@ export function App() {
     setThumbs((current) => {
       current.forEach((url) => URL.revokeObjectURL(url));
       return new Map();
-    });
-    setImage((current) => {
-      if (current) URL.revokeObjectURL(current.url);
-      return null;
     });
   };
 
@@ -460,7 +501,6 @@ export function App() {
 
   const sourcePage = doc.pageOrder[page] ?? 0;
   const pageInfo = open?.pages[sourcePage];
-  const rotation = doc.rotations[sourcePage] ?? 0;
   const [renderScale, setRenderScale] = useState(1.5);
 
   // Keep the render resolution in step with zoom so pages stay sharp.
@@ -472,46 +512,61 @@ export function App() {
 
   const openBytesRef = open?.bytes;
   const openPassword = open?.password;
-  useEffect(() => {
-    if (!openBytesRef || !doc.pageOrder.length) return;
-    let active = true;
-    setImage((current) => (current && current.source !== sourcePage ? null : current));
-    const render = async () => {
+  const renderForView = useCallback(
+    async (source: number, scale: number) => {
       try {
         await withTimeout(engine.current!.ready, 20_000, "The PDF renderer did not start.");
-        return await withTimeout(api().renderPage(sourcePage, renderScale), 30_000, "This page took too long to render.");
+        return await withTimeout(api().renderPage(source, scale), 30_000, "This page took too long to render.");
       } catch {
         await restartEngine(openBytesRef, openPassword);
-        return withTimeout(api().renderPage(sourcePage, renderScale), 30_000, "This page could not be rendered.");
+        return withTimeout(api().renderPage(source, scale), 30_000, "This page could not be rendered.");
       }
-    };
-    void render()
-      .then((png) => {
-        if (!active) return;
-        const url = pngUrl(png);
-        setImage((current) => {
-          if (current) URL.revokeObjectURL(current.url);
-          return { source: sourcePage, url };
-        });
-      })
-      .catch((cause) => active && fail(cause, "Page render failed"));
-    return () => {
-      active = false;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [openBytesRef, openPassword, sourcePage, doc.pageOrder.length, renderScale]);
+    },
+     
+    [openBytesRef, openPassword, restartEngine],
+  );
 
+  // A changed source document invalidates cached text and links.
+  const pageDataLoading = useRef(new Set<number>());
+  const currentBytes = useRef<ArrayBuffer | undefined>(undefined);
+  currentBytes.current = openBytesRef;
   useEffect(() => {
+    pageDataLoading.current.clear();
+    setPageData(new Map());
     if (!openBytesRef) return;
     let active = true;
-    setTextLines([]);
-    void withTimeout(api().extractTextLines(sourcePage), 20_000, "Reading page text took too long.")
-      .then((lines) => active && setTextLines(lines))
-      .catch(() => undefined);
+    void api()
+      .getOutline()
+      .then((entries) => active && setOutline(entries))
+      .catch(() => active && setOutline([]));
     return () => {
       active = false;
     };
-  }, [openBytesRef, sourcePage]);
+  }, [openBytesRef]);
+  const loadPageData = useCallback(
+    (sources: number[]) => {
+      const bytes = openBytesRef;
+      for (const source of sources) {
+        if (pageDataLoading.current.has(source)) continue;
+        pageDataLoading.current.add(source);
+        void Promise.all([
+          withTimeout(api().extractTextLines(source), 20_000, "Reading page text took too long."),
+          api().getLinks(source).catch(() => [] as PageLink[]),
+          api().listPageImages(source).catch(() => [] as PageImageBox[]),
+        ])
+          .then(([lines, links, images]) => {
+            if (bytes !== currentBytes.current) return;
+            setPageData((current) => new Map(current).set(source, { lines, links, images }));
+          })
+          .catch(() => pageDataLoading.current.delete(source));
+      }
+    },
+    [openBytesRef],
+  );
+  useEffect(() => {
+    if (openBytesRef && doc.pageOrder.length) loadPageData([sourcePage]);
+  }, [openBytesRef, sourcePage, doc.pageOrder.length, loadPageData]);
+  const textLines = pageData.get(sourcePage)?.lines ?? [];
 
   const requestThumb = useCallback(
     (source: number) => {
@@ -564,15 +619,29 @@ export function App() {
     if (page >= doc.pageOrder.length && doc.pageOrder.length > 0) setPage(doc.pageOrder.length - 1);
   }, [doc.pageOrder.length, page, setPage]);
 
-  // Fit-to-width / fit-to-page follows window size, page and rotation changes.
+  // Fit uses the document's most common page size, so scrolling past an odd
+  // landscape page doesn't make the zoom jump.
+  const typicalPage = useMemo(() => {
+    const counts = new Map<string, { width: number; height: number; count: number }>();
+    for (const source of doc.pageOrder) {
+      const info = open?.pages[source];
+      if (!info) continue;
+      const sideways = (((doc.rotations[source] ?? 0) % 360) + 360) % 180 !== 0;
+      const width = Math.round(sideways ? info.height : info.width);
+      const height = Math.round(sideways ? info.width : info.height);
+      const key = `${width}x${height}`;
+      const entry = counts.get(key) ?? { width, height, count: 0 };
+      entry.count += 1;
+      counts.set(key, entry);
+    }
+    return [...counts.values()].sort((a, b) => b.count - a.count)[0] ?? null;
+  }, [doc.pageOrder, doc.rotations, open?.pages]);
   useLayoutEffect(() => {
-    if (!fit || !pageInfo || !stageRef.current) return;
+    if (!fit || !typicalPage || !stageRef.current) return;
     const apply = () => {
       const stage = stageRef.current;
       if (!stage) return;
-      const sideways = rotation % 180 !== 0;
-      const width = sideways ? pageInfo.height : pageInfo.width;
-      const height = sideways ? pageInfo.width : pageInfo.height;
+      const { width, height } = typicalPage;
       const margin = window.innerWidth < 760 ? 16 : 48;
       const byWidth = (stage.clientWidth - margin) / width;
       const next = fit === "width" ? Math.min(byWidth, 1.5) : Math.min(byWidth, (stage.clientHeight - margin) / height);
@@ -582,7 +651,7 @@ export function App() {
     const observer = new ResizeObserver(apply);
     observer.observe(stageRef.current);
     return () => observer.disconnect();
-  }, [fit, pageInfo, rotation, setZoom, showRail, showComments]);
+  }, [fit, typicalPage, setZoom, showRail, showComments]);
 
   const zoomTo = useCallback(
     (next: number) => {
@@ -591,6 +660,32 @@ export function App() {
     },
     [setZoom],
   );
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("paperless:reading-theme", readingTheme);
+    } catch {
+      // Private browsing: the theme just isn't remembered.
+    }
+  }, [readingTheme]);
+  useEffect(() => {
+    if (!isPhone || !stageElement) return;
+    let timer = window.setTimeout(() => setPillShown(false), 1800);
+    const show = () => {
+      setPillShown(true);
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => setPillShown(false), 1500);
+    };
+    stageElement.addEventListener("scroll", show, { passive: true });
+    return () => {
+      window.clearTimeout(timer);
+      stageElement.removeEventListener("scroll", show);
+    };
+  }, [isPhone, stageElement]);
+  // Tools need the chrome; reading full screen is only for browsing.
+  useEffect(() => {
+    if (tool !== "select" || trayOpen) setImmersive(false);
+  }, [tool, trayOpen]);
 
   const closeDocument = useCallback(() => {
     resetView();
@@ -637,10 +732,14 @@ export function App() {
 
   const generated = useMemo(() => layoutOverlays(doc.layout, doc.pageOrder, open?.pages ?? []), [doc.layout, doc.pageOrder, open?.pages]);
   const current = useMemo(() => doc.overlays.filter((item) => item.page === sourcePage), [doc.overlays, sourcePage]);
-  const shownOverlays = useMemo(() => {
-    const layout = generated.filter((item) => item.page === sourcePage);
-    return [...layout.filter((item) => item.kind === "background"), ...current, ...layout.filter((item) => item.kind !== "background")];
-  }, [generated, current, sourcePage]);
+  const overlaysByPage = useMemo(() => {
+    const byPage = new Map<number, Overlay[]>();
+    const push = (overlay: Overlay) => byPage.set(overlay.page, [...(byPage.get(overlay.page) ?? []), overlay]);
+    generated.filter((item) => item.kind === "background").forEach(push);
+    doc.overlays.forEach(push);
+    generated.filter((item) => item.kind !== "background").forEach(push);
+    return byPage;
+  }, [generated, doc.overlays]);
   const selected = current.find((item) => item.id === selectedId) ?? null;
 
   const edited =
@@ -878,12 +977,121 @@ export function App() {
     execute(commands.length === 1 ? commands[0]! : { type: "batch", commands });
   };
 
+  /** Exports page groups as separate PDFs, bundled in a ZIP when there are several. */
+  const splitDocument = async (groups: number[][]) => {
+    if (!open || !groups.length) return;
+    setError("");
+    try {
+      const base = baseName(open.name);
+      const names = new Set<string>();
+      const files: { name: string; data: Uint8Array }[] = [];
+      for (const [index, group] of groups.entries()) {
+        setBusy(`Preparing file ${index + 1} of ${groups.length}…`);
+        const result = await withTimeout(api().exportDocument(exportRequest({ pageOrder: group.map((item) => doc.pageOrder[item]!) })), 120_000, "Splitting took too long.");
+        let name = `${base}-p${describeGroup(group)}.pdf`;
+        for (let copy = 2; names.has(name); copy += 1) name = `${base}-p${describeGroup(group)} (${copy}).pdf`;
+        names.add(name);
+        files.push({ name, data: result.bytes });
+      }
+      const message =
+        files.length === 1 ? await savePdf(files[0]!.data, files[0]!.name) : await saveFile(createZip(files), `${base}-split.zip`, "application/zip");
+      setNotice(`Split into ${files.length} file${files.length === 1 ? "" : "s"}. ${message}.`);
+      setDialog(null);
+    } catch (cause) {
+      fail(cause, "Splitting failed.");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const openPageSize = (scope: "page" | "selected" | "all") => {
+    const info = open?.pages[sourcePage];
+    const preset = info ? presetOf(info.width, info.height) : "A4";
+    setSizeDraft((draft) => ({
+      ...draft,
+      scope,
+      preset: preset === "custom" ? draft.preset : preset,
+      widthMm: info ? Math.round(pointsToMm(Math.min(info.width, info.height))) : draft.widthMm,
+      heightMm: info ? Math.round(pointsToMm(Math.max(info.width, info.height))) : draft.heightMm,
+    }));
+    setDialog("pageSize");
+  };
+
+  /** Replaces pages with copies fitted to a new size, moving their edits along. Undoable. */
+  const resizePages = async (indexes: number[], size: { width: number; height: number }, orientation: Orientation) => {
+    if (!open || !indexes.length) return;
+    // Sizes are chosen for the page as shown, but the engine works before the user's rotation.
+    const groups = new Map<string, { width: number; height: number; sources: number[] }>();
+    for (const index of indexes) {
+      const source = doc.pageOrder[index]!;
+      const info = open.pages[source]!;
+      const sideways = (((doc.rotations[source] ?? 0) % 360) + 360) % 180 !== 0;
+      const shown = targetSize(size, orientation, sideways ? { width: info.height, height: info.width } : info);
+      const stored = sideways ? { width: shown.height, height: shown.width } : shown;
+      if (Math.abs(stored.width - info.width) < 0.5 && Math.abs(stored.height - info.height) < 0.5) continue;
+      const key = `${stored.width.toFixed(2)}x${stored.height.toFixed(2)}`;
+      const group = groups.get(key) ?? { ...stored, sources: [] };
+      if (!group.sources.includes(source)) group.sources.push(source);
+      groups.set(key, group);
+    }
+    if (!groups.size) {
+      setNotice(indexes.length === 1 ? "The page already has that size." : "The pages already have that size.");
+      setDialog(null);
+      return;
+    }
+    setBusy("Resizing pages…");
+    setError("");
+    try {
+      const replaced = new Map<number, number>();
+      const overlays: Overlay[] = [];
+      const commands: Command[] = [];
+      let result: AppendResult | null = null;
+      for (const group of groups.values()) {
+        result = await withTimeout(api().appendPages({ type: "resize", ...group }), 60_000, "Resizing took too long.");
+        for (const mapping of result.mappings ?? []) {
+          replaced.set(mapping.source, mapping.target);
+          overlays.push(...doc.overlays.filter((overlay) => overlay.page === mapping.source).map((overlay) => mapOverlay(overlay, mapping, mapping.target)));
+          const rotation = doc.rotations[mapping.source];
+          if (rotation) commands.push({ type: "rotate", page: mapping.target, before: 0, after: rotation });
+          const crop = doc.crops[mapping.source];
+          if (crop) commands.push({ type: "setCrop", page: mapping.target, before: null, after: mapCrop(crop, mapping) });
+        }
+      }
+      const final = result!;
+      commands.unshift({ type: "setPageOrder", before: doc.pageOrder, after: doc.pageOrder.map((source) => replaced.get(source) ?? source) });
+      if (overlays.length) commands.push({ type: "addMany", overlays });
+      const bytes = new Uint8Array(final.bytes.byteLength);
+      bytes.set(final.bytes);
+      setOpen((currentDoc) =>
+        currentDoc && {
+          ...currentDoc,
+          bytes: bytes.buffer,
+          pages: final.pages,
+          formFields: final.formFields,
+          initialFormValues: { ...Object.fromEntries(final.formFields.map((field) => [field.name, field.value])), ...currentDoc.initialFormValues },
+        },
+      );
+      execute({ type: "batch", commands });
+      const count = [...groups.values()].reduce((sum, group) => sum + group.sources.length, 0);
+      setNotice(`Resized ${count} page${count === 1 ? "" : "s"}. Undo restores the original size.`);
+      setDialog(null);
+    } catch (cause) {
+      fail(cause, "The pages could not be resized.");
+    } finally {
+      setBusy("");
+    }
+  };
+
   const addOverlays = (overlays: Overlay[]) => {
     if (!overlays.length) return;
     execute(overlays.length === 1 ? { type: "add", overlay: overlays[0]! } : { type: "addMany", overlays });
     const last = overlays.at(-1)!;
-    setSelectedId(last.id);
-    if (["text", "attachment", "note", "stamp", "formField", "visualSignature"].includes(last.kind)) setTool("select");
+    // One-shot tools hand over to Select with the new object selected; drawing
+    // tools stay active with their options visible for the next stroke.
+    if (["text", "attachment", "note", "stamp", "formField", "visualSignature", "image"].includes(last.kind)) {
+      setSelectedId(last.id);
+      setTool("select");
+    }
     if (last.kind === "attachment") updateSettings({ pendingAttachment: null });
   };
   const update = (before: Overlay, after: Overlay, merge?: string) => execute({ type: "updateOverlay", before, after }, merge);
@@ -993,6 +1201,23 @@ export function App() {
       setDialog("pageImages");
     } catch (cause) {
       fail(cause, "Page images could not be extracted.");
+    } finally {
+      setBusy("");
+    }
+  };
+  /** Turns an image that is part of the page into an object that can be moved, resized, rotated or deleted. */
+  const liftImage = async (source: number, box: PageImageBox) => {
+    setBusy("Preparing image…");
+    try {
+      const image = (await api().extractPageImages(source)).find((item) => item.id === box.id);
+      if (!image) throw new Error("That image could not be read.");
+      const area = { x: box.x, y: box.y, width: box.width, height: box.height };
+      const overlay: Overlay = { id: crypto.randomUUID(), page: source, kind: "image", ...area, dataUrl: image.dataUrl, name: `page-${doc.pageOrder.indexOf(source) + 1}-image.png`, opacity: 1, rotation: 0 };
+      execute({ type: "addMany", overlays: [{ id: crypto.randomUUID(), page: source, kind: "redact", ...area, color: "#ffffff", mode: "eraseImage" }, overlay] });
+      setSelectedId(overlay.id);
+      setNotice("Drag to move, use the handles to resize or rotate, or press Delete to remove the image.");
+    } catch (cause) {
+      fail(cause, "The image could not be edited.");
     } finally {
       setBusy("");
     }
@@ -1115,16 +1340,61 @@ export function App() {
       fitMode: "auto",
     };
   };
-  const eraseBox = (line: { x: number; y: number; width: number; height: number }, source: number): Overlay => {
+  /**
+   * Erases a line of text. Only a band from just below the x-height to the
+   * baseline is erased: every glyph of the line crosses it, while glyph boxes
+   * of tightly spaced neighbouring lines never reach it.
+   */
+  const eraseBox = (line: { x: number; width: number; baseline: number; size: number }, source: number): Overlay => {
+    const pageHeight = open?.pages[source]?.height ?? 792;
     const pad = 0.0015;
-    const y = Math.max(0, line.y - pad);
-    return { id: crypto.randomUUID(), page: source, kind: "redact", x: Math.max(0, line.x - pad), y, width: Math.min(1, line.width + pad * 2), height: Math.min(1 - y, line.height + pad * 2), color: "#ffffff", mode: "eraseText" };
+    const y = Math.max(0, line.baseline - (0.7 * line.size) / pageHeight);
+    return {
+      id: crypto.randomUUID(),
+      page: source,
+      kind: "redact",
+      x: Math.max(0, line.x - pad),
+      y,
+      width: Math.min(1, line.width + pad * 2),
+      height: Math.min(1 - y, (0.65 * line.size) / pageHeight),
+      color: "#ffffff",
+      mode: "eraseText",
+    };
   };
   const buildReplacement = (edit: OriginalEdit) => {
     const source = edit.source;
     const info = open?.pages[source];
     if (!info) return { overlays: [] as Overlay[], selectId: null as string | null };
     const line = edit.line;
+    if (edit.paragraph) {
+      // One box that reflows within the paragraph's width.
+      const paragraph = edit.paragraph;
+      const erase = paragraph.lines.map((item) => eraseBox(item, source));
+      if (!edit.draft.trim()) return { overlays: erase, selectId: null };
+      const style = { ...line, x: paragraph.x, width: reflowWidth(paragraph), height: paragraph.height, fitMode: "auto" as const };
+      const overlay: TextOverlay = {
+        id: crypto.randomUUID(),
+        page: source,
+        kind: "text",
+        x: paragraph.x,
+        y: topForBaseline(style, paragraph.lines[0]!.baseline, info),
+        width: style.width,
+        height: Math.max(paragraph.height, layoutStyled(style, edit.draft, info).height / info.height),
+        text: edit.draft,
+        size: line.size,
+        color: line.color,
+        fontFamily: line.fontFamily,
+        fontName: line.fontName || null,
+        bold: line.bold,
+        italic: line.italic,
+        underline: false,
+        alignment: line.alignment,
+        lineHeight: line.lineHeight,
+        letterSpacing: line.letterSpacing,
+        fitMode: "auto",
+      };
+      return { overlays: [...erase, overlay], selectId: overlay.id };
+    }
     // Runs on the same baseline that touch the edited run form one mixed-style
     // line; separate cells or columns further away are left alone.
     const sameBaseline = edit.lines.filter((candidate) => Math.abs(candidate.baseline - line.baseline) < 0.002).sort((a, b) => a.x - b.x);
@@ -1142,9 +1412,7 @@ export function App() {
     // Mixed-style line: re-flow every run so later runs move with the edit.
     const left = Math.min(...runs.map((run) => run.x));
     const right = Math.max(...runs.map((run) => run.x + run.width));
-    const top = Math.min(...runs.map((run) => run.y));
-    const bottom = Math.max(...runs.map((run) => run.y + run.height));
-    const overlays: Overlay[] = [eraseBox({ x: left, y: top, width: right - left, height: bottom - top }, source)];
+    const overlays: Overlay[] = [eraseBox({ x: left, width: right - left, baseline: line.baseline, size: Math.max(...runs.map((run) => run.size)) }, source)];
     // Runs before the edited one stay put; later runs keep their original
     // gaps but shift with the edited run's new width.
     const editedIndex = runs.findIndex((run) => run.id === line.id);
@@ -1171,7 +1439,10 @@ export function App() {
     if (!edit) return;
     setOriginalEdit(null);
     const extracted = edit.lines.find((line) => line.id === edit.line.id);
-    if (edit.draft === edit.line.text && JSON.stringify(extracted) === JSON.stringify(edit.line)) return;
+    if (edit.paragraph) {
+      const original = { ...extracted, alignment: edit.paragraph.alignment, lineHeight: edit.paragraph.lineHeight };
+      if (edit.draft === edit.paragraph.text && JSON.stringify(original) === JSON.stringify(edit.line)) return;
+    } else if (edit.draft === edit.line.text && JSON.stringify(extracted) === JSON.stringify(edit.line)) return;
     const { overlays, selectId } = buildReplacement(edit);
     if (!overlays.length) return;
     execute({ type: "addMany", overlays });
@@ -1231,7 +1502,10 @@ export function App() {
   };
   const showResult = (result: FindResult) => {
     const index = doc.pageOrder.indexOf(result.sourcePage);
-    if (index >= 0) setPage(index);
+    if (index >= 0) {
+      viewRef.current?.scrollToPage(index, result.line.y);
+      setPage(index);
+    }
     setTool("select");
     setSearchHighlight({ sourcePage: result.sourcePage, rect: { x: result.line.x, y: result.line.y, width: result.line.width, height: result.line.height } });
   };
@@ -1347,34 +1621,8 @@ export function App() {
   useEffect(() => {
     const stage = stageRef.current;
     if (!stage) return;
-    let overscroll = 0;
-    let overscrollTimer = 0;
-    // Momentum scrolling must not skip several pages after a flip.
-    let flippedAt = 0;
     const wheel = (event: WheelEvent) => {
-      if (!event.ctrlKey && !event.metaKey) {
-        // Keep scrolling past the end of a page to reach the next one.
-        const { page: currentPage, doc: currentDoc, setPage: goTo } = useEditor.getState();
-        const atBottom = stage.scrollTop + stage.clientHeight >= stage.scrollHeight - 2;
-        const atTop = stage.scrollTop <= 0;
-        if (performance.now() - flippedAt < 600) return;
-        if ((event.deltaY > 0 && atBottom && currentPage < currentDoc.pageOrder.length - 1) || (event.deltaY < 0 && atTop && currentPage > 0)) {
-          if (Math.sign(overscroll) !== Math.sign(event.deltaY)) overscroll = 0;
-          overscroll += event.deltaY;
-          window.clearTimeout(overscrollTimer);
-          overscrollTimer = window.setTimeout(() => (overscroll = 0), 400);
-          if (Math.abs(overscroll) > 220) {
-            const forward = overscroll > 0;
-            overscroll = 0;
-            flippedAt = performance.now();
-            goTo(currentPage + (forward ? 1 : -1));
-            requestAnimationFrame(() => {
-              stage.scrollTop = forward ? 0 : stage.scrollHeight;
-            });
-          }
-        } else overscroll = 0;
-        return;
-      }
+      if (!event.ctrlKey && !event.metaKey) return;
       event.preventDefault();
       const current = useEditor.getState().zoom;
       const next = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, current * Math.exp(-event.deltaY * 0.0025)));
@@ -1391,7 +1639,90 @@ export function App() {
     };
     stage.addEventListener("wheel", wheel, { passive: false });
     return () => stage.removeEventListener("wheel", wheel);
-  }, [open, zoomTo]);
+  }, [open, zoomTo, stageElement]);
+
+  const goTo = (source: number, top = 0) => {
+    const index = doc.pageOrder.indexOf(source);
+    if (index < 0) {
+      setNotice("That page is not part of the document any more.");
+      return;
+    }
+    viewRef.current?.scrollToPage(index, top, "smooth");
+    setPage(index);
+  };
+  const followLink = (link: PageLink) => {
+    if (link.page !== undefined) goTo(link.page, link.top ?? 0);
+    else if (link.uri && window.confirm(`Open this link?\n\n${link.uri}`)) window.open(link.uri, "_blank", "noopener,noreferrer");
+  };
+  /** Interacting with a page that isn't current makes it current without scrolling. */
+  const activatePage = (index: number) => {
+    if (index === page) return;
+    viewRef.current?.markCurrent(index);
+    setPage(index);
+  };
+  const fitWidthZoom = () => {
+    const stage = stageRef.current;
+    if (!stage || !typicalPage) return zoom;
+    const width = typicalPage.width;
+    return Math.max(MIN_ZOOM, Math.min(1.5, (stage.clientWidth - (window.innerWidth < 760 ? 16 : 48)) / width));
+  };
+  const zoomAround = (next: number, clientX: number, clientY: number) => {
+    const stage = stageRef.current;
+    if (!stage) return;
+    const clamped = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, next));
+    const rect = stage.getBoundingClientRect();
+    const offsetX = clientX - rect.left;
+    const offsetY = clientY - rect.top;
+    const contentX = stage.scrollLeft + offsetX;
+    const contentY = stage.scrollTop + offsetY;
+    const ratio = clamped / zoom;
+    zoomTo(clamped);
+    requestAnimationFrame(() => {
+      stage.scrollLeft = contentX * ratio - offsetX;
+      stage.scrollTop = contentY * ratio - offsetY;
+    });
+  };
+  // Taps on the page: one toggles full-screen reading on phones, two zoom.
+  const tap = useRef({ x: 0, y: 0, at: 0, blocked: false, lastAt: 0, lastX: 0, lastY: 0, timer: 0 });
+  const stagePointerDown = (event: ReactPointerEvent) => {
+    const target = event.target as HTMLElement;
+    tap.current.blocked =
+      !event.isPrimary ||
+      tool !== "select" ||
+      Boolean(selectedId || originalEdit || editingId) ||
+      Boolean(target.closest(".objectBox, .originalTextHit, .linkHit, .inlineEditor, button, input, textarea, select"));
+    tap.current.x = event.clientX;
+    tap.current.y = event.clientY;
+    tap.current.at = performance.now();
+  };
+  const stagePointerUp = (event: ReactPointerEvent) => {
+    const state = tap.current;
+    if (state.blocked || pinch.current || performance.now() - state.at > 350 || Math.hypot(event.clientX - state.x, event.clientY - state.y) > 12) return;
+    const now = performance.now();
+    if (event.pointerType === "touch" && now - state.lastAt < 320 && Math.hypot(event.clientX - state.lastX, event.clientY - state.lastY) < 40) {
+      window.clearTimeout(state.timer);
+      state.lastAt = 0;
+      const fitted = fitWidthZoom();
+      if (zoom > fitted * 1.3) setFit("width");
+      else zoomAround(fitted * 2.2, event.clientX, event.clientY);
+      return;
+    }
+    state.lastAt = now;
+    state.lastX = event.clientX;
+    state.lastY = event.clientY;
+    window.clearTimeout(state.timer);
+    if (isPhone) state.timer = window.setTimeout(() => setImmersive((value) => !value), 330);
+  };
+  const choosePhoneTab = (id: TabId) => {
+    if (trayOpen && tab === id) {
+      setTrayOpen(false);
+      chooseTool("select");
+      return;
+    }
+    setTab(id);
+    setTrayOpen(true);
+    if (!tabs.find((item) => item.id === id)?.items.some((entry) => entry.tool === tool)) chooseTool("select");
+  };
 
   const chooseTool = (next: Tool) => {
     if (originalEdit) commitOriginalEdit(originalEdit, false);
@@ -1620,14 +1951,14 @@ export function App() {
   const reviewOverlays = doc.overlays.filter(isReviewOverlay);
   const filteredReviews = reviewOverlays.filter((overlay) => commentFilter === "all" || (commentFilter === "resolved" ? overlay.resolved : !overlay.resolved));
   const fontOptions = Array.from(new Set([...textLines.map((line) => line.fontName), ...current.filter((item): item is TextOverlay => item.kind === "text").map((item) => item.fontName || item.fontFamily), ...commonFonts].filter(Boolean)));
-  const busyPage = !image || image.source !== sourcePage;
 
   type Item = { key: string; label: string; Icon: typeof MousePointer2; tool?: Tool; action?: () => void; active?: boolean; title?: string; disabled?: boolean };
   const toolItem = (id: Tool, label: string, Icon: typeof MousePointer2, title?: string): Item => ({ key: id, label, Icon, tool: id, title: `${title ?? label}${shortcutFor(id) ? ` (${shortcutFor(id)})` : ""}` });
-  const tabs: { id: TabId; label: string; items: Item[] }[] = [
+  const tabs: { id: TabId; label: string; Icon: typeof MousePointer2; items: Item[] }[] = [
     {
       id: "edit",
       label: "Edit",
+      Icon: Pencil,
       items: [
         toolItem("select", "Select", MousePointer2, "Select, move and edit — click existing text to change it"),
         toolItem("text", "Add text", Type),
@@ -1635,13 +1966,15 @@ export function App() {
         toolItem("shape", "Shapes", Shapes),
         toolItem("line", "Line", ArrowUpRight, "Line or arrow"),
         toolItem("ink", "Draw", PenLine),
-        toolItem("redact", "Redact", Eraser, "Permanently remove content under a box"),
+        toolItem("eraser", "Eraser", Eraser, "Erase pen, highlighter and line strokes"),
+        toolItem("redact", "Redact", EyeOff, "Permanently remove content under a box"),
         { key: "pageImages", label: "Page images", Icon: FileImage, action: () => void openNativeImages(), title: "Extract or replace images in this page" },
       ],
     },
     {
       id: "comment",
       label: "Comment",
+      Icon: MessageSquareText,
       items: [
         toolItem("markup", "Highlight", Highlighter, "Highlight, underline or strike text"),
         toolItem("note", "Note", MessageSquareText, "Sticky note or callout"),
@@ -1654,6 +1987,7 @@ export function App() {
     {
       id: "sign",
       label: "Fill & Sign",
+      Icon: Signature,
       items: [
         toolItem("signature", "Sign", Signature, "Draw, type or place a signature"),
         toolItem("form", "Add field", FileKey2, "Draw a new form field"),
@@ -1664,6 +1998,7 @@ export function App() {
     {
       id: "pages",
       label: "Pages",
+      Icon: Layers,
       items: [
         { key: "organize", label: "Organize", Icon: Layers, action: () => { setSelectedPages([page]); setDialog("pages"); }, title: "Reorder, rotate, delete and extract pages" },
         { key: "rotateLeft", label: "Rotate left", Icon: RotateCcw, action: () => rotatePages([sourcePage], -90) },
@@ -1675,6 +2010,8 @@ export function App() {
         { key: "imagePages", label: "Images as pages", Icon: Images, action: () => inputs.imagePages.current?.click(), title: "Insert photos or scans as new pages" },
         { key: "merge", label: "Append PDF", Icon: FileOutput, action: () => inputs.merge.current?.click(), title: "Add another PDF at the end" },
         { key: "pageImage", label: "Page to image", Icon: ImageDown, action: () => void savePageImage(), title: "Save this page as a PNG image" },
+        { key: "split", label: "Split", Icon: Scissors, action: () => setDialog("split"), title: "Split into several PDFs by page ranges", disabled: doc.pageOrder.length < 2 },
+        { key: "pageSize", label: "Page size", Icon: Scaling, action: () => openPageSize("page"), title: "Change the paper size, scaling the content to fit" },
         { key: "extract", label: "Extract page", Icon: FileOutput, action: () => void exportPages([sourcePage], `${baseName(open.name)}-page-${page + 1}.pdf`, `Page ${page + 1} exported.`), title: "Save this page as its own PDF" },
         { key: "layout", label: "Header & footer", Icon: LayoutTemplate, action: openLayout, title: "Headers, footers, page numbers, watermark, Bates numbering" },
         { key: "deletePage", label: "Delete page", Icon: Trash2, action: () => removePages([page]), disabled: doc.pageOrder.length < 2 },
@@ -1683,8 +2020,17 @@ export function App() {
     {
       id: "tools",
       label: "Tools",
+      Icon: Wrench,
       items: [
         { key: "find", label: "Find & replace", Icon: Search, action: () => setDialog("find") },
+        {
+          key: "theme",
+          label: readingTheme === "day" ? "Night mode" : readingTheme === "night" ? "Sepia" : "Day mode",
+          Icon: Moon,
+          action: () => setReadingTheme(readingTheme === "day" ? "night" : readingTheme === "night" ? "sepia" : "day"),
+          title: "Change how pages look while reading (not the exported file)",
+          active: readingTheme !== "day",
+        },
         { key: "print", label: "Print", Icon: Printer, action: () => void printDocument(), title: "Print with all edits (Ctrl+P)" },
         { key: "text", label: "Export text", Icon: FileText, action: () => void exportText(), title: "Save all text as a .txt file" },
         { key: "ocr", label: "OCR scan", Icon: ScanText, action: () => { setOcrProgress(""); setDialog("ocr"); }, title: "Recognise text in scanned pages" },
@@ -1801,9 +2147,14 @@ export function App() {
           </label>
         </>
       );
+    if (tool === "eraser") return <span className="hint">Drag across pen, highlighter or line strokes to erase them.</span>;
     if (tool === "line" || tool === "ink")
       return (
         <>
+          {tool === "ink" &&
+            select("Pen", settings.penStyle, [["pen", "Pen"], ["highlighter", "Highlighter"]], (penStyle) =>
+              updateSettings(penStyle === "highlighter" ? { penStyle, drawColor: "#ffd400", strokeWidth: 14 } : { penStyle, drawColor: "#d64b35", strokeWidth: 2 }),
+            )}
           {tool === "line" && select("Ends", settings.lineArrow, [["none", "Plain line"], ["end", "Arrow"], ["both", "Double arrow"]], (lineArrow) => updateSettings({ lineArrow }))}
           {colorField("Colour", settings.drawColor, (drawColor) => updateSettings({ drawColor }))}
           <label>
@@ -1890,8 +2241,19 @@ export function App() {
       return (
         <>
           <span className="editingLabel">
-            <Pencil /> Editing original text
+            <Pencil /> {originalEdit.paragraph ? `Editing paragraph (${originalEdit.paragraph.lines.length} lines)` : "Editing original text"}
           </span>
+          {originalEdit.paragraph && (
+            <button
+              title="Edit only the line you tapped"
+              onClick={() => {
+                const extracted = originalEdit.lines.find((line) => line.id === originalEdit.line.id) ?? originalEdit.line;
+                setOriginalEdit({ line: extracted, draft: extracted.text, source: originalEdit.source, lines: originalEdit.lines });
+              }}
+            >
+              This line only
+            </button>
+          )}
           {textControls({ ...originalEdit.line, fontName: originalEdit.line.fontName }, (patch) => setOriginalEdit({ ...originalEdit, line: { ...originalEdit.line, ...patch, fontName: patch.fontName ?? (patch.bold !== undefined || patch.italic !== undefined ? "" : originalEdit.line.fontName) } as PositionedTextLine }))}
           <button className="primaryAction" onClick={() => commitOriginalEdit(originalEdit, true)} title="Apply (Ctrl+Enter)">
             Apply
@@ -2045,6 +2407,26 @@ export function App() {
   })();
 
   const contextContent = selectionOptions ?? toolOptions;
+  const ribbonBar = (
+<div className="ribbon" role="toolbar" aria-label={`${activeTab.label} tools`}>
+        {activeTab.items.map((item) => {
+          const active = item.tool ? tool === item.tool : item.active;
+          return (
+            <button
+              key={item.key}
+              className={active ? "chosen" : ""}
+              aria-pressed={item.tool ? active : undefined}
+              title={item.title ?? item.label}
+              disabled={item.disabled}
+              onClick={() => (item.tool ? chooseTool(item.tool) : item.action?.())}
+            >
+              <item.Icon />
+              <span>{item.label}</span>
+            </button>
+          );
+        })}
+      </div>
+  );
   const hiddenInputs = (
     <>
       <input ref={inputs.image} hidden type="file" accept="image/png,image/jpeg" onChange={pickFile(addImage)} />
@@ -2072,7 +2454,7 @@ export function App() {
   );
 
   return (
-    <div className="app" onDragOver={(event) => event.preventDefault()} onDrop={drop}>
+    <div className={`app ${isPhone ? "phone" : ""} ${immersive ? "immersive" : ""}`} onDragOver={(event) => event.preventDefault()} onDrop={drop}>
       <header className="top">
         <div className="file">
           <button className="iconButton" aria-label="Close document" title="Close document" onClick={closeDocument}>
@@ -2085,7 +2467,7 @@ export function App() {
             </small>
           </div>
         </div>
-        <nav className="tabs" aria-label="Tool groups" role="tablist">
+        {!isPhone && <nav className="tabs" aria-label="Tool groups" role="tablist">
           {tabs.map((item) => (
             <button
               key={item.id}
@@ -2100,8 +2482,13 @@ export function App() {
               {item.label}
             </button>
           ))}
-        </nav>
+        </nav>}
         <div className="topActions">
+          {isPhone && (
+            <button className="iconButton" aria-label={showRail ? "Hide pages" : "Show pages"} aria-pressed={showRail} onClick={() => setShowRail((value) => !value)}>
+              <PanelLeft />
+            </button>
+          )}
           <button className="iconButton" aria-label="Undo" title="Undo (Ctrl+Z)" disabled={!undo.length} onClick={undoOnce}>
             <Undo2 />
           </button>
@@ -2116,35 +2503,51 @@ export function App() {
           </button>
         </div>
       </header>
-      <div className="ribbon" role="toolbar" aria-label={`${activeTab.label} tools`}>
-        {activeTab.items.map((item) => {
-          const active = item.tool ? tool === item.tool : item.active;
-          return (
-            <button
-              key={item.key}
-              className={active ? "chosen" : ""}
-              aria-pressed={item.tool ? active : undefined}
-              title={item.title ?? item.label}
-              disabled={item.disabled}
-              onClick={() => (item.tool ? chooseTool(item.tool) : item.action?.())}
-            >
-              <item.Icon />
-              <span>{item.label}</span>
-            </button>
-          );
-        })}
-      </div>
-      {contextContent && <div className="contextBar">{contextContent}</div>}
+      {!isPhone && ribbonBar}
+      {!isPhone && contextContent && <div className="contextBar">{contextContent}</div>}
       <div className={`work ${showRail ? "withRail" : ""} ${showComments ? "withComments" : ""}`}>
         {showRail && (
-          <aside className="rail" aria-label="Pages">
+          <aside className="rail" aria-label="Pages and outline">
             <div className="railTitle">
-              <b>Pages</b>
+              <div className="segmented" role="tablist">
+                <button role="tab" aria-selected={railTab === "pages"} className={railTab === "pages" ? "active" : ""} onClick={() => setRailTab("pages")}>
+                  Thumbnails
+                </button>
+                <button role="tab" aria-selected={railTab === "outline"} className={railTab === "outline" ? "active" : ""} onClick={() => setRailTab("outline")}>
+                  Outline
+                </button>
+              </div>
               <button className="iconButton" aria-label="Hide pages" onClick={() => setShowRail(false)}>
                 <X />
               </button>
             </div>
-            {doc.pageOrder.map((source, index) => (
+            {railTab === "outline" && (
+              <nav className="outline" aria-label="Document outline">
+                {outline.length ? (
+                  outline.map((entry, index) => (
+                    <button
+                      key={index}
+                      className="outlineEntry"
+                      style={{ paddingLeft: 8 + entry.depth * 14 }}
+                      disabled={entry.page === null && !entry.uri}
+                      onClick={() => {
+                        if (entry.page !== null) goTo(entry.page);
+                        else if (entry.uri) followLink({ x: 0, y: 0, width: 0, height: 0, uri: entry.uri });
+                        if (isPhone) setShowRail(false);
+                      }}
+                    >
+                      <span>{entry.title}</span>
+                      {entry.page !== null && <small>{doc.pageOrder.indexOf(entry.page) + 1 || "–"}</small>}
+                    </button>
+                  ))
+                ) : (
+                  <p className="empty">
+                    <BookOpen /> This document has no outline.
+                  </p>
+                )}
+              </nav>
+            )}
+            {railTab === "pages" && doc.pageOrder.map((source, index) => (
               <div
                 key={source}
                 role="button"
@@ -2195,56 +2598,107 @@ export function App() {
           </aside>
         )}
         <main className="canvasArea">
-          <div ref={stageRef} className="stage" onTouchStart={beginPinch} onTouchMove={movePinch} onTouchEnd={endPinch} onTouchCancel={endPinch}>
-            {(busy || busyPage) && (
+          <div
+            ref={(node) => {
+              stageRef.current = node;
+              if (node !== stageElement) setStageElement(node);
+            }}
+            className={`stage theme-${readingTheme}`}
+            onTouchStart={beginPinch}
+            onTouchMove={movePinch}
+            onTouchEnd={endPinch}
+            onTouchCancel={endPinch}
+            onPointerDownCapture={stagePointerDown}
+            onPointerUp={stagePointerUp}
+          >
+            {busy && (
               <div className="loading" role="status">
-                <span className="spinner" /> {busy || "Rendering page…"}
+                <span className="spinner" /> {busy}
               </div>
             )}
             <div className="pageViewport">
-              <PageCanvas
-                key={`${sourcePage}-${fontsReady}`}
-                image={image?.source === sourcePage ? image.url : null}
-                info={pageInfo}
+              <DocumentView
+                ref={viewRef}
+                stage={stageElement}
+                pageOrder={doc.pageOrder}
+                pages={open.pages}
+                rotations={doc.rotations}
                 zoom={zoom}
-                rotation={rotation}
-                overlays={shownOverlays}
-                textLines={textLines}
-                originalEdit={originalEdit}
-                crop={doc.crops[sourcePage]}
-                tool={tool}
-                settings={settings}
-                selectedId={selectedId}
-                editingId={editingId}
-                highlight={searchHighlight?.sourcePage === sourcePage ? searchHighlight.rect : null}
-                page={sourcePage}
-                onSelect={(id) => {
-                  if (originalEdit) commitOriginalEdit(originalEdit, false);
-                  if (id !== editingId) setEditingId(null);
-                  setSelectedId(id);
-                  setSearchHighlight(null);
+                renderScale={renderScale}
+                documentKey={open.bytes}
+                page={page}
+                render={renderForView}
+                onPageChange={setPage}
+                onVisibleChange={loadPageData}
+              >
+                {({ source, index, image }) => {
+                  const lines = pageData.get(source)?.lines ?? [];
+                  return (
+                    <div className="pageHost" onPointerDownCapture={() => activatePage(index)}>
+                      <PageCanvas
+                        key={`${source}-${fontsReady}`}
+                        image={image}
+                        info={open.pages[source]!}
+                        zoom={zoom}
+                        rotation={doc.rotations[source] ?? 0}
+                        overlays={overlaysByPage.get(source) ?? []}
+                        textLines={lines}
+                        textEditable={tab === "edit" && (!isPhone || trayOpen)}
+                        links={pageData.get(source)?.links ?? []}
+                        pageImages={tab === "edit" && (!isPhone || trayOpen) ? (pageData.get(source)?.images ?? []) : []}
+                        onLiftImage={(image) => void liftImage(source, image)}
+                        onLink={followLink}
+                        originalEdit={originalEdit?.source === source ? originalEdit : null}
+                        crop={doc.crops[source]}
+                        tool={tool}
+                        settings={settings}
+                        selectedId={selectedId}
+                        editingId={editingId}
+                        highlight={searchHighlight?.sourcePage === source ? searchHighlight.rect : null}
+                        page={source}
+                        onSelect={(id) => {
+                          if (originalEdit) commitOriginalEdit(originalEdit, false);
+                          if (id !== editingId) setEditingId(null);
+                          setSelectedId(id);
+                          setSearchHighlight(null);
+                        }}
+                        onEditText={setEditingId}
+                        onOriginalSelect={(line) => {
+                          if (originalEdit) commitOriginalEdit(originalEdit, false);
+                          setSelectedId(null);
+                          setEditingId(null);
+                          // A line inside a uniform paragraph edits the whole paragraph.
+                          const paragraph = findParagraph(lines, line, open.pages[source]!);
+                          setOriginalEdit(
+                            paragraph
+                              ? { line: { ...line, alignment: paragraph.alignment, lineHeight: paragraph.lineHeight }, draft: paragraph.text, source, lines, paragraph }
+                              : { line, draft: line.text, source, lines },
+                          );
+                        }}
+                        onOriginalChange={(draft) => setOriginalEdit((currentEdit) => (currentEdit ? { ...currentEdit, draft } : null))}
+                        onOriginalCommit={() => commitOriginalEdit(originalEdit, true)}
+                        onOriginalCancel={() => setOriginalEdit(null)}
+                        onAdd={addOverlays}
+                        onRemove={(removed) => execute(removed.length === 1 ? { type: "remove", overlay: removed[0]! } : { type: "removeMany", overlays: removed })}
+                        onUpdate={update}
+                        onCrop={(crop) => {
+                          execute({ type: "setCrop", page: source, before: doc.crops[source] ?? null, after: crop });
+                          chooseTool("select");
+                          setNotice("Page cropped. Choose Crop again to adjust or remove it.");
+                        }}
+                        onMessage={setError}
+                      />
+                    </div>
+                  );
                 }}
-                onEditText={setEditingId}
-                onOriginalSelect={(line) => {
-                  if (originalEdit) commitOriginalEdit(originalEdit, false);
-                  setSelectedId(null);
-                  setEditingId(null);
-                  setOriginalEdit({ line, draft: line.text, source: sourcePage, lines: textLines });
-                }}
-                onOriginalChange={(draft) => setOriginalEdit((currentEdit) => (currentEdit ? { ...currentEdit, draft } : null))}
-                onOriginalCommit={() => commitOriginalEdit(originalEdit, true)}
-                onOriginalCancel={() => setOriginalEdit(null)}
-                onAdd={addOverlays}
-                onUpdate={update}
-                onCrop={(crop) => {
-                  execute({ type: "setCrop", page: sourcePage, before: doc.crops[sourcePage] ?? null, after: crop });
-                  chooseTool("select");
-                  setNotice("Page cropped. Choose Crop again to adjust or remove it.");
-                }}
-                onMessage={setError}
-              />
+              </DocumentView>
             </div>
           </div>
+          {isPhone && (
+            <button className={`pagePill ${pillShown || immersive ? "" : "faded"}`} aria-label={`Page ${page + 1} of ${doc.pageOrder.length}. Show pages`} onClick={() => setShowRail(true)}>
+              {page + 1} / {doc.pageOrder.length}
+            </button>
+          )}
           <footer className="status">
             <div>
               <button className="iconButton" aria-label={showRail ? "Hide pages" : "Show pages"} title="Pages" aria-pressed={showRail} onClick={() => setShowRail((value) => !value)}>
@@ -2357,6 +2811,20 @@ export function App() {
           </aside>
         )}
       </div>
+      {isPhone && (
+        <div className="phoneDock">
+          {contextContent && <div className="contextBar">{contextContent}</div>}
+          {trayOpen && ribbonBar}
+          <nav className="bottomNav" role="tablist" aria-label="Tool groups">
+            {tabs.map((item) => (
+              <button key={item.id} role="tab" aria-selected={trayOpen && tab === item.id} className={trayOpen && tab === item.id ? "selected" : ""} onClick={() => choosePhoneTab(item.id)}>
+                <item.Icon />
+                <span>{item.label}</span>
+              </button>
+            ))}
+          </nav>
+        </div>
+      )}
       {hiddenInputs}
 
       {dialog === "properties" && (
@@ -2607,6 +3075,12 @@ export function App() {
             <button disabled={!selectedPages.length} onClick={() => void exportPages([...selectedPages].sort((a, b) => a - b).map((index) => doc.pageOrder[index]!), `${baseName(open.name)}-extracted.pdf`, `Extracted ${selectedPages.length} page${selectedPages.length === 1 ? "" : "s"}.`)}>
               <FileOutput /> Extract
             </button>
+            <button disabled={!selectedPages.length} onClick={() => openPageSize("selected")}>
+              <Scaling /> Page size
+            </button>
+            <button disabled={doc.pageOrder.length < 2} onClick={() => setDialog("split")}>
+              <Scissors /> Split…
+            </button>
             <button className="danger" disabled={!selectedPages.length || selectedPages.length >= doc.pageOrder.length} onClick={() => removePages(selectedPages)}>
               <Trash2 /> Delete
             </button>
@@ -2634,6 +3108,116 @@ export function App() {
           </div>
         </Modal>
       )}
+
+      {dialog === "split" && (() => {
+        const plan = splitMode === "every" ? splitEvery(splitEveryDraft, doc.pageOrder.length) : parseRanges(splitRangesDraft, doc.pageOrder.length);
+        return (
+          <Modal
+            title="Split document"
+            description="Save parts of this document as separate PDFs with their edits. Several files are saved together as a ZIP."
+            onClose={() => setDialog(null)}
+            footer={
+              <>
+                <button onClick={() => setDialog(null)}>Cancel</button>
+                <button className="primary" disabled={"error" in plan || Boolean(busy)} onClick={() => "groups" in plan && void splitDocument(plan.groups)}>
+                  {"groups" in plan ? `Save ${plan.groups.length} file${plan.groups.length === 1 ? "" : "s"}` : "Save"}
+                </button>
+              </>
+            }
+          >
+            <div className="segmented" role="radiogroup" aria-label="Split by">
+              <button role="radio" aria-checked={splitMode === "every"} className={splitMode === "every" ? "active" : ""} onClick={() => setSplitMode("every")}>Every N pages</button>
+              <button role="radio" aria-checked={splitMode === "ranges"} className={splitMode === "ranges" ? "active" : ""} onClick={() => setSplitMode("ranges")}>Page ranges</button>
+            </div>
+            <div className="fieldGrid">
+              {splitMode === "every" ? (
+                <label>
+                  Pages per file
+                  <NumberField label="Pages per file" value={splitEveryDraft} min={1} max={doc.pageOrder.length} onCommit={setSplitEveryDraft} />
+                </label>
+              ) : (
+                <label>
+                  Ranges, one file each
+                  <input autoFocus value={splitRangesDraft} placeholder={`e.g. 1-3, 4, 5-${doc.pageOrder.length}`} onChange={(event) => setSplitRangesDraft(event.target.value)} />
+                </label>
+              )}
+            </div>
+            <p className={"error" in plan ? "fieldError" : "splitSummary"} role="status">
+              {"error" in plan
+                ? plan.error
+                : `${plan.groups.length} file${plan.groups.length === 1 ? "" : "s"}: pages ${plan.groups.slice(0, 8).map(describeGroup).join(", ")}${plan.groups.length > 8 ? ", …" : ""}`}
+            </p>
+          </Modal>
+        );
+      })()}
+
+      {dialog === "pageSize" && (() => {
+        const indexes = sizeDraft.scope === "all" ? doc.pageOrder.map((_, index) => index) : sizeDraft.scope === "selected" && selectedPages.length ? [...selectedPages].sort((a, b) => a - b) : [page];
+        const size = sizeDraft.preset === "custom" ? { width: mmToPoints(sizeDraft.widthMm), height: mmToPoints(sizeDraft.heightMm) } : PAGE_SIZES[sizeDraft.preset];
+        const info = open.pages[sourcePage];
+        return (
+          <Modal
+            title="Page size"
+            description="Content is scaled to fit the new paper size and centred. Undo restores the original pages."
+            onClose={() => setDialog(null)}
+            footer={
+              <>
+                <button onClick={() => setDialog(null)}>Cancel</button>
+                <button className="primary" disabled={Boolean(busy)} onClick={() => void resizePages(indexes, size, sizeDraft.orientation)}>
+                  Resize {indexes.length === 1 ? "page" : `${indexes.length} pages`}
+                </button>
+              </>
+            }
+          >
+            {info && (
+              <p className="splitSummary">
+                Page {page + 1} is {Math.round(pointsToMm(info.width))} × {Math.round(pointsToMm(info.height))} mm{presetOf(info.width, info.height) !== "custom" ? ` (${presetOf(info.width, info.height)})` : ""}.
+              </p>
+            )}
+            <div className="fieldGrid">
+              <label>
+                Pages
+                <select value={sizeDraft.scope} onChange={(event) => setSizeDraft({ ...sizeDraft, scope: event.target.value as typeof sizeDraft.scope })}>
+                  <option value="page">This page</option>
+                  {selectedPages.length > 1 && <option value="selected">Selected pages ({selectedPages.length})</option>}
+                  <option value="all">All pages</option>
+                </select>
+              </label>
+              <label>
+                Paper size
+                <select value={sizeDraft.preset} onChange={(event) => setSizeDraft({ ...sizeDraft, preset: event.target.value as PageSizePreset })}>
+                  {(Object.keys(PAGE_SIZES) as (keyof typeof PAGE_SIZES)[]).map((key) => (
+                    <option key={key} value={key}>
+                      {PAGE_SIZES[key].label} ({Math.round(pointsToMm(PAGE_SIZES[key].width))} × {Math.round(pointsToMm(PAGE_SIZES[key].height))} mm)
+                    </option>
+                  ))}
+                  <option value="custom">Custom</option>
+                </select>
+              </label>
+              {sizeDraft.preset === "custom" && (
+                <>
+                  <label>
+                    Width (mm)
+                    <NumberField label="Width (mm)" value={sizeDraft.widthMm} min={20} max={5000} onCommit={(widthMm) => setSizeDraft({ ...sizeDraft, widthMm })} />
+                  </label>
+                  <label>
+                    Height (mm)
+                    <NumberField label="Height (mm)" value={sizeDraft.heightMm} min={20} max={5000} onCommit={(heightMm) => setSizeDraft({ ...sizeDraft, heightMm })} />
+                  </label>
+                </>
+              )}
+              <label>
+                Orientation
+                <select value={sizeDraft.orientation} onChange={(event) => setSizeDraft({ ...sizeDraft, orientation: event.target.value as Orientation })}>
+                  <option value="keep">Keep each page's orientation</option>
+                  <option value="portrait">Portrait</option>
+                  <option value="landscape">Landscape</option>
+                </select>
+              </label>
+            </div>
+          </Modal>
+        );
+      })()}
 
       {dialog === "layout" && (
         <Modal
@@ -2878,7 +3462,7 @@ export function App() {
               ["Ctrl + / Ctrl − / Ctrl+0", "Zoom in / out / fit width"],
               ["Ctrl + scroll, pinch", "Zoom"],
               ["← → / PgUp PgDn / Home End", "Change page"],
-              ["V T D L R H N S", "Select, Text, Draw, Line, Shapes, Highlight, Note, Sign"],
+              ["V T D E L R H N S", "Select, Text, Draw, Eraser, Line, Shapes, Highlight, Note, Sign"],
               ["Del", "Delete selection"],
               ["Arrows (Shift)", "Nudge selection (further)"],
               ["Ctrl+C / Ctrl+V / Ctrl+D", "Copy / paste / duplicate selection"],

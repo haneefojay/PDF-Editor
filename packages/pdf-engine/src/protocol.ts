@@ -47,6 +47,9 @@ export type PositionedTextLine = {
   height: number;
   /** Normalized y of the text baseline. */
   baseline: number;
+  /** Text block and line within the page, used to group lines into paragraphs. */
+  block?: number;
+  line?: number;
   size: number;
   color: string;
   fontFamily: string;
@@ -57,6 +60,26 @@ export type PositionedTextLine = {
   lineHeight: number;
   letterSpacing: number;
   fitMode: "auto" | "shrink" | "overflow";
+};
+
+export type OutlineEntry = {
+  title: string;
+  /** Target page index, or null when the entry has no destination in this file. */
+  page: number | null;
+  depth: number;
+  uri?: string;
+};
+/** A clickable area on a page, in normalized coordinates. */
+export type PageLink = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** Internal target page and normalized vertical position on it. */
+  page?: number;
+  top?: number;
+  /** External target (web or mail address). */
+  uri?: string;
 };
 
 /** Overlays are exported exactly as the editor stores them. */
@@ -104,13 +127,27 @@ export type AppendOperation =
   | { type: "blank"; width: number; height: number }
   | { type: "images"; images: ArrayBuffer[] }
   | { type: "copy"; source: number }
+  /** Copies of pages fitted (scaled and centred) to a new display size in points. */
+  | { type: "resize"; sources: number[]; width: number; height: number }
   | { type: "pdf"; bytes: ArrayBuffer; password?: string };
+
+/** How normalized positions on a source page map onto its resized copy. */
+export type PageMapping = {
+  source: number;
+  target: number;
+  scale: number;
+  scaleX: number;
+  scaleY: number;
+  offsetX: number;
+  offsetY: number;
+};
 
 export type AppendResult = DocumentInfo & {
   /** The new source document; the appended pages follow the old ones. */
   bytes: Uint8Array;
   firstIndex: number;
   count: number;
+  mappings?: PageMapping[];
 };
 
 /** Error messages start with one of these codes so the UI can react. */
@@ -123,6 +160,11 @@ export interface PdfWorkerApi {
   extractText(index: number): Promise<string>;
   extractTextLines(index: number): Promise<PositionedTextLine[]>;
   extractPageImages(index: number): Promise<PageImage[]>;
+  /** Image positions on a page, without decoding the pixels. */
+  listPageImages(index: number): Promise<Omit<PageImage, "dataUrl">[]>;
+  /** The document outline (bookmarks), flattened in reading order. */
+  getOutline(): Promise<OutlineEntry[]>;
+  getLinks(index: number): Promise<PageLink[]>;
   exportDocument(request: ExportRequest): Promise<ExportResult>;
   /**
    * Adds pages to the end of the source document without touching edits, so

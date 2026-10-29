@@ -59,6 +59,8 @@ export const Overlay = z.discriminatedUnion("kind", [
     points: z.array(Point).min(2),
     color: z.string(),
     width: z.number().positive(),
+    /** Below 1 for highlighter strokes. */
+    opacity: z.number().min(0.05).max(1).optional(),
   }),
   z.object({
     id: z.string(),
@@ -245,6 +247,7 @@ export type Tool =
   | "signature"
   | "shape"
   | "line"
+  | "eraser"
   | "redact"
   | "crop"
   | "markup"

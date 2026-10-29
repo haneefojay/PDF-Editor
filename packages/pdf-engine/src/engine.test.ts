@@ -406,3 +406,221 @@ describe("conversion helpers", () => {
     expect([...png.slice(1, 4)].map((c) => String.fromCharCode(c)).join("")).toBe("PNG");
   });
 });
+
+describe("navigation", () => {
+  function linkedPdf() {
+    const doc = new mupdf.PDFDocument();
+    for (let index = 0; index < 3; index += 1) doc.insertPage(-1, doc.addPage([0, 0, 600, 800], 0, doc.newDictionary(), ""));
+    const first = doc.loadPage(0);
+    first.createLink([50, 50, 150, 70], doc.formatLinkURI({ type: "XYZ", chapter: 0, page: 2, x: 0, y: 400, width: 0, height: 0, zoom: 0 }));
+    first.createLink([50, 100, 150, 120], "https://example.com/report");
+    first.createLink([50, 150, 150, 170], "javascript:alert(1)");
+    const outline = doc.outlineIterator();
+    outline.insert({ title: "Introduction", uri: doc.formatLinkURI({ type: "Fit", chapter: 0, page: 0, x: 0, y: 0, width: 0, height: 0, zoom: 0 }), open: true });
+    outline.insert({ title: "Results", uri: doc.formatLinkURI({ type: "Fit", chapter: 0, page: 2, x: 0, y: 0, width: 0, height: 0, zoom: 0 }), open: true });
+    outline.destroy();
+    const bytes = doc.saveToBuffer("").asUint8Array();
+    doc.destroy();
+    return new Uint8Array(bytes).buffer;
+  }
+
+  it("reads the outline with target pages", async () => {
+    const engine = await engineWith(linkedPdf());
+    const outline = await engine.getOutline();
+    expect(outline.map((entry) => [entry.title, entry.page, entry.depth])).toEqual([
+      ["Introduction", 0, 0],
+      ["Results", 2, 0],
+    ]);
+  });
+
+  it("lists internal and safe external links", async () => {
+    const engine = await engineWith(linkedPdf());
+    const links = await engine.getLinks(0);
+    expect(links).toHaveLength(2);
+    const internal = links.find((link) => link.page !== undefined)!;
+    expect(internal.page).toBe(2);
+    expect(internal.x).toBeCloseTo(50 / 600, 3);
+    expect(internal.y).toBeCloseTo(50 / 800, 3);
+    expect(links.find((link) => link.uri)?.uri).toBe("https://example.com/report");
+    expect(await engine.getLinks(1)).toEqual([]);
+  });
+});
+
+describe("erasing one line of tightly spaced text", () => {
+  const lines = ["First line of the paragraph", "Second line to replace", "Third line stays put."];
+  const body = lines.map((line, index) => `${index ? "0 -14 Td " : ""}(${line}) Tj`).join(" ");
+  const source = makePdf([{ content: `BT /F1 12 Tf 72 680 Td ${body} ET` }]);
+
+  it("leaves the neighbouring lines alone when erasing a baseline band", async () => {
+    const engine = await engineWith(source);
+    const extracted = await engine.extractTextLines(0);
+    const target = extracted.find((line) => line.text.startsWith("Second"))!;
+    // The band the editor erases: from just under the x-height to the baseline.
+    const top = target.baseline - (0.7 * target.size) / 800;
+    const result = await engine.exportDocument(
+      request({
+        overlays: [{ id: "e", page: 0, kind: "redact", x: target.x, y: top, width: target.width, height: (0.65 * target.size) / 800, color: "#ffffff", mode: "eraseText" }],
+      }),
+    );
+    const text = pageText(result.bytes);
+    expect(text).not.toContain("Second");
+    expect(text).toContain("First line of the paragraph");
+    expect(text).toContain("Third line stays put.");
+  });
+});
+
+describe("removing embedded images", () => {
+  function imagePdf() {
+    const doc = new mupdf.PDFDocument();
+    const pixmap = new mupdf.Pixmap(mupdf.ColorSpace.DeviceRGB, [0, 0, 20, 20], false);
+    pixmap.clear(0);
+    const resources = doc.newDictionary();
+    const xobjects = doc.newDictionary();
+    xobjects.put("Im1", doc.addImage(new mupdf.Image(pixmap)));
+    resources.put("XObject", xobjects);
+    // A blue panel with the image drawn on it, and the same image again below.
+    const content = "0 0 1 rg 50 400 300 200 re f q 100 0 0 80 100 450 cm /Im1 Do Q q 50 0 0 50 400 100 cm /Im1 Do Q";
+    doc.insertPage(-1, doc.addPage([0, 0, 600, 800], 0, resources, content));
+    const bytes = doc.saveToBuffer("").asUint8Array();
+    doc.destroy();
+    return new Uint8Array(bytes).buffer;
+  }
+  const colourAt = (bytes: Uint8Array, x: number, y: number) => {
+    const doc = mupdf.Document.openDocument(bytes, "application/pdf");
+    const pixmap = doc.loadPage(0).toPixmap([1, 0, 0, 1, 0, 0], mupdf.ColorSpace.DeviceRGB, false, true);
+    const offset = (Math.round(y * pixmap.getHeight()) * pixmap.getWidth() + Math.round(x * pixmap.getWidth())) * pixmap.getNumberOfComponents();
+    const pixels = pixmap.getPixels();
+    return [pixels[offset]!, pixels[offset + 1]!, pixels[offset + 2]!];
+  };
+
+  it("lists images with their positions", async () => {
+    const engine = await engineWith(imagePdf());
+    const images = await engine.listPageImages(0);
+    expect(images).toHaveLength(2);
+    expect(images[0]!.x).toBeCloseTo(100 / 600, 3);
+    expect(images[0]!.y).toBeCloseTo((800 - 530) / 800, 3);
+  });
+
+  it("removes just the chosen image and keeps what is behind it", async () => {
+    const engine = await engineWith(imagePdf());
+    const [first] = await engine.listPageImages(0);
+    const result = await engine.exportDocument(
+      request({ overlays: [{ id: "e", page: 0, kind: "redact", x: first!.x, y: first!.y, width: first!.width, height: first!.height, color: "#ffffff", mode: "eraseImage" }] }),
+    );
+    // The blue panel shows where the image was, instead of a white hole.
+    expect(colourAt(result.bytes, (first!.x + first!.width / 2), first!.y + first!.height / 2)).toEqual([0, 0, 255]);
+    // The second copy of the same image is still drawn.
+    expect(colourAt(result.bytes, 425 / 600, (800 - 125) / 800)).toEqual([0, 0, 0]);
+  });
+});
+
+describe("highlighter strokes", () => {
+  it("exports ink opacity", async () => {
+    const engine = await engineWith(makePdf([{}]));
+    const result = await engine.exportDocument(
+      request({ overlays: [{ id: "h", page: 0, kind: "ink", points: [{ x: 0.1, y: 0.1 }, { x: 0.5, y: 0.1 }], color: "#ffd400", width: 14, opacity: 0.4 }] }),
+    );
+    const doc = mupdf.Document.openDocument(result.bytes, "application/pdf") as mupdf.PDFDocument;
+    const [annotation] = doc.loadPage(0).getAnnotations();
+    expect(annotation!.getType()).toBe("Ink");
+    expect(annotation!.getOpacity()).toBeCloseTo(0.4, 2);
+    doc.destroy();
+  });
+});
+
+describe("resizing pages", () => {
+  it("fits content and annotations into the new size and reports the mapping", async () => {
+    const doc = new mupdf.PDFDocument();
+    const resources = doc.newDictionary();
+    const fonts = doc.newDictionary();
+    fonts.put("F1", doc.addSimpleFont(new mupdf.Font("Helvetica")));
+    resources.put("Font", fonts);
+    doc.insertPage(-1, doc.addPage([0, 0, 600, 800], 0, resources, "BT /F1 20 Tf 100 700 Td (Corner) Tj ET"));
+    const page = doc.loadPage(0);
+    const ink = page.createAnnotation("Ink");
+    ink.setInkList([[[300, 400], [400, 400]]]);
+    ink.update();
+    const bytes = new Uint8Array(doc.saveToBuffer("").asUint8Array()).buffer;
+    doc.destroy();
+
+    const engine = await engineWith(bytes);
+    const before = (await engine.extractTextLines(0))[0]!;
+    const result = await engine.appendPages({ type: "resize", sources: [0], width: 300, height: 300 });
+    expect(result.firstIndex).toBe(1);
+    expect(result.pages[1]).toEqual({ width: 300, height: 300 });
+    const [mapping] = result.mappings!;
+    expect(mapping!.scale).toBeCloseTo(0.375);
+    expect(mapping!.offsetX).toBeCloseTo((300 - 225) / 2 / 300);
+    expect(mapping!.offsetY).toBeCloseTo(0);
+
+    const after = (await engine.extractTextLines(1))[0]!;
+    expect(after.text).toBe("Corner");
+    expect(after.x).toBeCloseTo(before.x * mapping!.scaleX + mapping!.offsetX, 2);
+    expect(after.baseline).toBeCloseTo(before.baseline * mapping!.scaleY + mapping!.offsetY, 2);
+    expect(after.size).toBeCloseTo(20 * 0.375, 1);
+
+    const exported = await engine.exportDocument(request({ pageOrder: [1] }));
+    const out = mupdf.Document.openDocument(exported.bytes, "application/pdf") as mupdf.PDFDocument;
+    const [annotation] = out.loadPage(0).getAnnotations();
+    const start = (annotation!.getInkList() as [number, number][][])[0]![0];
+    // (300, 400) user → display (300, 400) → scaled and centred.
+    expect(start![0]).toBeCloseTo(300 * 0.375 + 37.5, 0);
+    expect(start![1]).toBeCloseTo(400 * 0.375, 0);
+    out.destroy();
+  });
+});
+
+describe("copying pages with annotations", () => {
+  const annotated = () => {
+    const doc = new mupdf.PDFDocument();
+    doc.insertPage(-1, doc.addPage([0, 0, 400, 400], 0, doc.newDictionary(), ""));
+    const page = doc.loadPage(0);
+    const note = page.createAnnotation("Text");
+    note.setRect([50, 300, 70, 320]);
+    note.setContents("Look here");
+    note.update();
+    const field = page.createAnnotation("Widget");
+    field.setRect([50, 100, 250, 130]);
+    const object = field.getObject();
+    object.put("FT", doc.newName("Tx"));
+    object.put("T", doc.newString("name"));
+    object.put("V", doc.newString("Ada"));
+    const root = doc.getTrailer().get("Root");
+    const form = doc.newDictionary();
+    const fields = doc.newArray();
+    fields.push(object);
+    form.put("Fields", fields);
+    root.put("AcroForm", form);
+    field.update();
+    const bytes = new Uint8Array(doc.saveToBuffer("").asUint8Array()).buffer;
+    doc.destroy();
+    return bytes;
+  };
+
+  const inspect = (bytes: Uint8Array, index: number) => {
+    const out = mupdf.Document.openDocument(bytes, "application/pdf") as mupdf.PDFDocument;
+    const page = out.loadPage(index);
+    const notes = page.getAnnotations().map((annotation) => annotation.getContents());
+    const widgets = page.getWidgets().map((widget) => widget.getValue());
+    const fieldCount = out.getTrailer().get("Root").get("AcroForm").get("Fields").length;
+    out.destroy();
+    return { notes, widgets, fieldCount };
+  };
+
+  it("keeps notes and form fields on duplicated pages", async () => {
+    const engine = await engineWith(annotated());
+    const copy = await engine.appendPages({ type: "copy", source: 0 });
+    expect(inspect(copy.bytes, 1)).toEqual({ notes: ["Look here"], widgets: ["Ada"], fieldCount: 2 });
+    const exported = await engine.exportDocument(request({ pageOrder: [0, 1] }));
+    expect(inspect(exported.bytes, 1)).toEqual({ notes: ["Look here"], widgets: ["Ada"], fieldCount: 2 });
+    // Exporting a subset keeps only the fields on exported pages.
+    const subset = await engine.exportDocument(request({ pageOrder: [1] }));
+    expect(inspect(subset.bytes, 0)).toEqual({ notes: ["Look here"], widgets: ["Ada"], fieldCount: 1 });
+  });
+
+  it("keeps them when inserting another PDF", async () => {
+    const engine = await engineWith(makePdf([{}]));
+    const imported = await engine.appendPages({ type: "pdf", bytes: annotated() });
+    expect(inspect(imported.bytes, 1)).toEqual({ notes: ["Look here"], widgets: ["Ada"], fieldCount: 1 });
+  });
+});

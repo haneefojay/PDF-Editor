@@ -7,10 +7,11 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { normalizeRect, type Overlay, type Tool } from "@paperless/editor-core";
-import type { PageInfo, PositionedTextLine } from "@paperless/pdf-engine";
+import type { PageImage, PageInfo, PageLink, PositionedTextLine } from "@paperless/pdf-engine";
 import { fitTextBox, layoutStyled, previewTextStyle } from "./textMetrics";
 import { boundsOf, snapToText, type Rect } from "./geometry";
 import { LAYOUT_ID } from "./layout";
+import { reflowWidth, type Paragraph } from "./paragraphs";
 
 export type ShapeKind = "rectangle" | "square" | "circle" | "triangle";
 export type MarkupKind = "highlight" | "underline" | "strikeout" | "squiggly";
@@ -19,6 +20,7 @@ type TextOverlay = Extract<Overlay, { kind: "text" }>;
 
 export type CanvasSettings = {
   shapeKind: ShapeKind;
+  penStyle: "pen" | "highlighter";
   drawColor: string;
   fillColor: string | null;
   strokeWidth: number;
@@ -45,7 +47,14 @@ export type CanvasSettings = {
 };
 
 /** An in-progress edit of original text, with the page's text runs at the time. */
-export type OriginalEdit = { line: PositionedTextLine; draft: string; source: number; lines: PositionedTextLine[] };
+export type OriginalEdit = {
+  line: PositionedTextLine;
+  draft: string;
+  source: number;
+  lines: PositionedTextLine[];
+  /** Set when a whole paragraph is being edited and will reflow as one box. */
+  paragraph?: Paragraph;
+};
 
 const rectTools: Tool[] = ["shape", "redact", "crop", "markup", "measure", "form"];
 const pointTools: Tool[] = ["ink", "line"];
@@ -96,6 +105,13 @@ export function PageCanvas(props: {
   rotation: number;
   overlays: Overlay[];
   textLines: PositionedTextLine[];
+  /** Whether tapping original text starts editing it (off while just reading on phones). */
+  textEditable: boolean;
+  links: PageLink[];
+  onLink: (link: PageLink) => void;
+  /** Images drawn by the page itself, offered for lifting into editable objects. */
+  pageImages: Omit<PageImage, "dataUrl">[];
+  onLiftImage: (image: Omit<PageImage, "dataUrl">) => void;
   originalEdit: OriginalEdit | null;
   crop?: Rect;
   tool: Tool;
@@ -111,6 +127,7 @@ export function PageCanvas(props: {
   onOriginalCommit: () => void;
   onOriginalCancel: () => void;
   onAdd: (overlays: Overlay[]) => void;
+  onRemove: (overlays: Overlay[]) => void;
   onUpdate: (before: Overlay, after: Overlay, merge?: string) => void;
   onCrop: (crop: Rect) => void;
   onMessage: (message: string) => void;
@@ -119,12 +136,15 @@ export function PageCanvas(props: {
   const wrapRef = useRef<HTMLDivElement>(null);
   const start = useRef<Point | null>(null);
   const points = useRef<Point[]>([]);
-  const drag = useRef<{ before: Overlay; start: Point; bounds: Rect; mode: "move" | "resize" } | null>(null);
+  const drag = useRef<{ before: Overlay; start: Point; bounds: Rect; mode: "move" | "resize" | "rotate" } | null>(null);
   const [livePoints, setLivePoints] = useState<Point[]>([]);
   const [liveRect, setLiveRect] = useState<Rect | null>(null);
   const [preview, setPreview] = useState<Overlay | null>(null);
   const [guides, setGuides] = useState<{ x?: number; y?: number }>({});
   const [draft, setDraftState] = useState<Draft | null>(null);
+  // Strokes the eraser has touched during the current drag.
+  const [erasing, setErasing] = useState<Set<string>>(new Set());
+  const [eraserAt, setEraserAt] = useState<Point | null>(null);
   // Commits can come from both blur and a page click; the ref makes them idempotent.
   const draftRef = useRef<Draft | null>(null);
   const setDraft = (next: Draft | null) => {
@@ -219,6 +239,23 @@ export function PageCanvas(props: {
     ]);
   };
 
+  /** Strokes passing within the eraser's radius of a point (in page points). */
+  const strokesNear = (at: Point) => {
+    const radius = 10 / zoom;
+    const distance = (a: Point, b: Point) => {
+      const ax = a.x * info.width, ay = a.y * info.height, bx = b.x * info.width, by = b.y * info.height;
+      const px = at.x * info.width, py = at.y * info.height;
+      const length = (bx - ax) ** 2 + (by - ay) ** 2;
+      const t = length ? Math.max(0, Math.min(1, ((px - ax) * (bx - ax) + (py - ay) * (by - ay)) / length)) : 0;
+      return Math.hypot(px - (ax + t * (bx - ax)), py - (ay + t * (by - ay)));
+    };
+    return props.overlays.filter(
+      (overlay) =>
+        (overlay.kind === "ink" || overlay.kind === "signature" || overlay.kind === "line") &&
+        overlay.points.some((point, index) => distance(point, overlay.points[Math.min(index + 1, overlay.points.length - 1)]!) <= radius + overlay.width / 2),
+    );
+  };
+
   const down = (event: ReactPointerEvent) => {
     if (event.button > 0) return;
     if (draftRef.current) {
@@ -274,8 +311,12 @@ export function PageCanvas(props: {
     wrapRef.current?.setPointerCapture(event.pointerId);
     start.current = at;
     points.current = [at];
-    setLivePoints([at]);
+    setLivePoints(tool === "eraser" ? [] : [at]);
     setLiveRect(null);
+    if (tool === "eraser") {
+      setEraserAt(at);
+      setErasing(new Set(strokesNear(at).map((overlay) => overlay.id)));
+    }
   };
 
   const move = (event: ReactPointerEvent) => {
@@ -285,6 +326,17 @@ export function PageCanvas(props: {
       const dx = current.x - origin.x;
       const dy = current.y - origin.y;
       if (before.kind === "background") return;
+      if (mode === "rotate" && before.kind === "image") {
+        const cx = bounds.x + bounds.width / 2;
+        const cy = bounds.y + bounds.height / 2;
+        // The handle sits above the image, so straight up is 0°.
+        let angle = (Math.atan2((current.y - cy) * info.height, (current.x - cx) * info.width) * 180) / Math.PI + 90;
+        angle = ((angle + 540) % 360) - 180;
+        const snapped = Math.round(angle / 15) * 15;
+        if (Math.abs(angle - snapped) < 4) angle = snapped;
+        setPreview({ ...before, rotation: Math.round(angle * 10) / 10 });
+        return;
+      }
       if ("points" in before) {
         if (mode === "move") {
           const shiftX = Math.min(1 - bounds.x - bounds.width, Math.max(-bounds.x, dx));
@@ -328,7 +380,13 @@ export function PageCanvas(props: {
       }
       return;
     }
+    if (tool === "eraser") setEraserAt(current);
     if (!start.current) return;
+    if (tool === "eraser") {
+      const touched = strokesNear(current);
+      if (touched.some((overlay) => !erasing.has(overlay.id))) setErasing(new Set([...erasing, ...touched.map((overlay) => overlay.id)]));
+      return;
+    }
     if (pointTools.includes(tool) || (tool === "signature" && settings.signatureMode === "draw")) {
       points.current = tool === "line" ? [start.current, current] : [...points.current, current];
       setLivePoints(points.current);
@@ -361,12 +419,26 @@ export function PageCanvas(props: {
     points.current = [];
     setLivePoints([]);
     setLiveRect(null);
+    if (tool === "eraser") {
+      const removed = props.overlays.filter((overlay) => erasing.has(overlay.id));
+      setErasing(new Set());
+      if (removed.length) props.onRemove(removed);
+      return;
+    }
     const id = crypto.randomUUID();
     if ((tool === "ink" || (tool === "signature" && settings.signatureMode === "draw")) && stroke.length > 1)
       props.onAdd([
         tool === "signature"
           ? { id, page, kind: "signature", points: stroke, color: "#1d2a5b", width: 2 }
-          : { id, page, kind: "ink", points: stroke, color: settings.drawColor, width: settings.strokeWidth },
+          : {
+              id,
+              page,
+              kind: "ink",
+              points: stroke,
+              color: settings.drawColor,
+              width: settings.strokeWidth,
+              ...(settings.penStyle === "highlighter" ? { opacity: 0.4 } : {}),
+            },
       ]);
     if (tool === "line" && Math.hypot(end.x - origin.x, end.y - origin.y) > 0.01)
       props.onAdd([{ id, page, kind: "line", points: [origin, end], color: settings.drawColor, width: settings.strokeWidth, arrow: settings.lineArrow }]);
@@ -457,8 +529,8 @@ export function PageCanvas(props: {
       ]);
   };
 
-  const shown = props.overlays.map((overlay) => (preview?.id === overlay.id ? preview : overlay));
-  const objectDown = (event: ReactPointerEvent, overlay: Overlay, mode: "move" | "resize") => {
+  const shown = props.overlays.filter((overlay) => !erasing.has(overlay.id)).map((overlay) => (preview?.id === overlay.id ? preview : overlay));
+  const objectDown = (event: ReactPointerEvent, overlay: Overlay, mode: "move" | "resize" | "rotate") => {
     if (tool !== "select" || event.button > 0) return;
     event.stopPropagation();
     if (props.editingId === overlay.id) return;
@@ -482,9 +554,17 @@ export function PageCanvas(props: {
   const liveMarkup = liveRect && tool === "markup" ? snapToText(liveRect, props.textLines) : [];
   const editing = shown.find((overlay): overlay is TextOverlay => overlay.kind === "text" && overlay.id === props.editingId) ?? null;
   const original = props.originalEdit;
-  const originalBox = original ? fitTextBox({ ...original.line, fitMode: "auto", lineHeight: 1.2 }, original.draft, info) : null;
-  const originalLayout = original && originalBox ? layoutStyled({ ...original.line, fitMode: "auto", lineHeight: 1.2 }, original.draft, info, originalBox.width) : null;
+  const paragraph = original?.paragraph;
+  const originalStyle = original ? { ...original.line, fitMode: "auto" as const, lineHeight: paragraph ? original.line.lineHeight : 1.2 } : null;
+  const originalArea = paragraph ?? original?.line ?? null;
+  const originalBox = original && originalStyle ? (paragraph ? { width: reflowWidth(paragraph) } : fitTextBox(originalStyle, original.draft, info)) : null;
+  const originalLayout = original && originalStyle && originalBox ? layoutStyled(originalStyle, original.draft, info, originalBox.width) : null;
+  const editedLines = new Set((paragraph?.lines ?? (original ? [original.line] : [])).map((line) => line.id));
   const draftSize = draft?.kind === "text" ? settings.textSize : 11;
+  // Focus new editors without letting the browser scroll the page sideways.
+  const focusOnce = (node: HTMLTextAreaElement | null) => {
+    if (node && document.activeElement !== node) node.focus({ preventScroll: true });
+  };
   const editorKeys = (event: ReactKeyboardEvent, commit: () => void, cancel: () => void) => {
     event.stopPropagation();
     if (event.key === "Escape") {
@@ -508,7 +588,7 @@ export function PageCanvas(props: {
       onPointerCancel={up}
     >
       <div
-        className={`page tool-${tool}`}
+        className={`page tool-${tool} ${props.image ? "" : "rendering"}`}
         style={{ width: pageWidth, height: pageHeight, transform: `translate(-50%, -50%) rotate(${rotation}deg)` }}
       >
         {props.image && <img src={props.image} alt={`Rendered PDF page ${page + 1}`} draggable={false} />}
@@ -526,8 +606,12 @@ export function PageCanvas(props: {
                 style={{ ...percent(overlay), opacity: overlay.opacity, transform: `rotate(${overlay.rotation}deg)` }}
               />
             );
-          if (overlay.kind === "redact" && overlay.mode !== "redact" && (overlay.mode || overlay.color.toLowerCase() === "#ffffff"))
-            return <span key={overlay.id} className="eraseOverlay" style={percent(overlay)} />;
+          if (overlay.kind === "redact" && overlay.mode !== "redact" && (overlay.mode || overlay.color.toLowerCase() === "#ffffff")) {
+            // Text erasure only removes a band around the baseline; cover the
+            // whole glyph height on screen so ascenders and descenders vanish.
+            const shown = overlay.mode === "eraseText" ? { ...overlay, y: overlay.y - overlay.height * 0.55, height: overlay.height * 2 } : overlay;
+            return <span key={overlay.id} className="eraseOverlay" style={percent(shown)} />;
+          }
           if (overlay.kind === "visualSignature")
             return overlay.mode === "image" && overlay.dataUrl ? (
               <img key={overlay.id} className="visualSignatureOverlay" src={overlay.dataUrl} alt={`Signature of ${overlay.signer}`} draggable={false} style={percent(overlay)} />
@@ -584,7 +668,18 @@ export function PageCanvas(props: {
           {shown.map((overlay) => {
             const line = { vectorEffect: "non-scaling-stroke" as const, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
             if (overlay.kind === "ink" || overlay.kind === "signature")
-              return <polyline key={overlay.id} points={overlay.points.map((point) => `${point.x},${point.y}`).join(" ")} fill="none" stroke={overlay.color} strokeWidth={overlay.width * zoom} {...line} />;
+              return (
+                <polyline
+                  key={overlay.id}
+                  points={overlay.points.map((point) => `${point.x},${point.y}`).join(" ")}
+                  fill="none"
+                  stroke={overlay.color}
+                  strokeWidth={overlay.width * zoom}
+                  opacity={overlay.kind === "ink" ? overlay.opacity : undefined}
+                  style={overlay.kind === "ink" && overlay.opacity !== undefined ? { mixBlendMode: "multiply" } : undefined}
+                  {...line}
+                />
+              );
             if (overlay.kind === "line")
               return (
                 <line
@@ -671,6 +766,7 @@ export function PageCanvas(props: {
               <polyline
                 points={livePoints.map((point) => `${point.x},${point.y}`).join(" ")}
                 fill="none"
+                opacity={tool === "ink" && settings.penStyle === "highlighter" ? 0.4 : undefined}
                 stroke={tool === "signature" ? "#1d2a5b" : settings.drawColor}
                 strokeWidth={(tool === "signature" ? 2 : settings.strokeWidth) * zoom}
                 vectorEffect="non-scaling-stroke"
@@ -702,6 +798,9 @@ export function PageCanvas(props: {
           )}
           {props.crop && <rect className="cropRect" {...props.crop} vectorEffect="non-scaling-stroke" />}
           {props.highlight && <rect className="searchHighlight" {...props.highlight} />}
+          {tool === "eraser" && eraserAt && (
+            <ellipse className="eraserCursor" cx={eraserAt.x} cy={eraserAt.y} rx={10 / zoom / info.width} ry={10 / zoom / info.height} vectorEffect="non-scaling-stroke" />
+          )}
           {guides.x !== undefined && <line className="guide" x1={guides.x} y1="0" x2={guides.x} y2="1" vectorEffect="non-scaling-stroke" />}
           {guides.y !== undefined && <line className="guide" x1="0" y1={guides.y} x2="1" y2={guides.y} vectorEffect="non-scaling-stroke" />}
         </svg>
@@ -715,8 +814,50 @@ export function PageCanvas(props: {
           ) : null,
         )}
         {tool === "select" &&
+          props.pageImages
+            .filter(
+              (image) =>
+                !shown.some(
+                  (overlay) =>
+                    overlay.kind === "redact" &&
+                    overlay.mode === "eraseImage" &&
+                    Math.abs(overlay.x - image.x) < 0.002 &&
+                    Math.abs(overlay.y - image.y) < 0.002,
+                ),
+            )
+            .map((image) => (
+              <button
+                key={image.id}
+                className="embeddedImageHit"
+                aria-label={`Edit image (${image.pixelWidth}×${image.pixelHeight})`}
+                title="Click to move, resize, rotate or delete this image"
+                style={percent(image)}
+                onPointerDown={(event) => {
+                  event.stopPropagation();
+                  props.onLiftImage(image);
+                }}
+              />
+            ))}
+        {tool === "select" &&
+          props.links.map((link, index) => (
+            <a
+              key={`link-${index}`}
+              className="linkHit"
+              href={link.uri ?? `#page-${(link.page ?? 0) + 1}`}
+              aria-label={link.uri ? `Link to ${link.uri}` : `Link to page ${(link.page ?? 0) + 1}`}
+              title={link.uri ?? "Go to linked page"}
+              style={percent(link)}
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.preventDefault();
+                props.onLink(link);
+              }}
+            />
+          ))}
+        {tool === "select" &&
+          props.textEditable &&
           props.textLines
-            .filter((line) => !lineWasReplaced(line) && line.id !== original?.line.id)
+            .filter((line) => !lineWasReplaced(line) && !editedLines.has(line.id))
             .map((line) => (
               <button
                 key={line.id}
@@ -730,21 +871,23 @@ export function PageCanvas(props: {
                 }}
               />
             ))}
-        {original && originalLayout && (
+        {original && originalLayout && originalArea && originalStyle && (
           <>
-            <span className="eraseOverlay" style={percent(original.line)} />
+            {(paragraph?.lines ?? [original.line]).map((line) => (
+              <span key={line.id} className="eraseOverlay" style={percent(line)} />
+            ))}
             <textarea
-              autoFocus
+              ref={focusOnce}
               className="inlineEditor"
-              aria-label="Edit original PDF text"
+              aria-label={paragraph ? "Edit paragraph" : "Edit original PDF text"}
               value={original.draft}
               spellCheck={false}
               style={{
-                left: `${original.line.x * 100}%`,
-                top: `${original.line.y * 100}%`,
-                width: `${Math.max(original.line.width, originalBox!.width) * 100}%`,
-                height: `${Math.max(original.line.height, originalLayout.height / info.height) * 100}%`,
-                ...previewTextStyle({ ...original.line, lineHeight: 1.2 }, originalLayout.size, zoom),
+                left: `${originalArea.x * 100}%`,
+                top: `${originalArea.y * 100}%`,
+                width: `${Math.max(originalArea.width, originalBox!.width) * 100}%`,
+                height: `${Math.max(originalArea.height, originalLayout.height / info.height) * 100}%`,
+                ...previewTextStyle(originalStyle, originalLayout.size, zoom),
                 textAlign: original.line.alignment,
               }}
               onPointerDown={(event) => event.stopPropagation()}
@@ -755,7 +898,7 @@ export function PageCanvas(props: {
         )}
         {editing && (
           <textarea
-            autoFocus
+            ref={focusOnce}
             className="inlineEditor"
             aria-label="Edit text"
             value={editing.text}
@@ -777,7 +920,7 @@ export function PageCanvas(props: {
         )}
         {draft && (
           <textarea
-            autoFocus
+            ref={focusOnce}
             className={`inlineEditor draft draft-${draft.kind}`}
             aria-label={draft.kind === "text" ? "New text" : "New comment"}
             placeholder={draft.kind === "text" ? "Type here" : "Write a comment"}
@@ -785,6 +928,7 @@ export function PageCanvas(props: {
             style={{
               left: `${draft.x * 100}%`,
               top: `${draft.y * 100}%`,
+              maxWidth: `${(1 - draft.x) * 100}%`,
               ...(draft.kind === "text"
                 ? previewTextStyle({ x: 0, width: 0, size: draftSize, fontFamily: settings.textFont, bold: false, italic: false, lineHeight: 1.2, letterSpacing: 0, fitMode: "auto", color: settings.textColor }, draftSize, zoom)
                 : { fontSize: 13 }),
@@ -804,12 +948,15 @@ export function PageCanvas(props: {
                 <div
                   key={`hit-${overlay.id}`}
                   className={`objectBox ${selected ? "selected" : ""} ${overlay.kind === "text" ? "textBox" : ""}`}
-                  style={percent(boundsOf(overlay))}
+                  style={{ ...percent(boundsOf(overlay)), transform: overlay.kind === "image" && overlay.rotation ? `rotate(${overlay.rotation}deg)` : undefined }}
                   title={overlay.kind === "text" ? "Double-click to edit" : undefined}
                   onPointerDown={(event) => objectDown(event, overlay, "move")}
                   onDoubleClick={() => overlay.kind === "text" && props.onEditText(overlay.id)}
                 >
                   {selected && <button className="resizeHandle" aria-label="Resize selected object" onPointerDown={(event) => objectDown(event, overlay, "resize")} />}
+                  {selected && overlay.kind === "image" && (
+                    <button className="rotateHandle" aria-label="Rotate selected image" onPointerDown={(event) => objectDown(event, overlay, "rotate")} />
+                  )}
                 </div>
               );
             })}
