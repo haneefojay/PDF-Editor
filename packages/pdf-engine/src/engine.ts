@@ -12,6 +12,8 @@ import type {
   AppendOperation,
   DocumentInfo,
   ImagePageSize,
+  LayoutTable,
+  PageLayout,
   ExportOverlay,
   ExportRequest,
   FormField,
@@ -1391,6 +1393,125 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
     }
   };
 
+  /** Everything a converter needs from one page, in points from its displayed top-left. */
+  const analyzePage = (target: Mupdf.Document, index: number): PageLayout => {
+    const page = target.loadPage(index);
+    const bounds = page.getBounds();
+    const [left, top] = bounds;
+    const layout: PageLayout = { width: bounds[2] - bounds[0], height: bounds[3] - bounds[1], spans: [], images: [], rects: [], tables: [] };
+    const structured = page.toStructuredText("preserve-whitespace,preserve-images,vectors");
+    let block = -1;
+    let line = -1;
+    type Run = { key: string; text: string; box: Mupdf.Rect; baseline: number; size: number; color: string; font: Mupdf.Font; space: string };
+    let run: Run | null = null;
+    const flush = () => {
+      const current = run as Run | null;
+      run = null;
+      if (!current || !current.text.trim()) return;
+      const name = current.font.getName();
+      const named = extractedFont(name);
+      layout.spans.push({
+        text: current.text.trim(),
+        x: current.box[0] - left,
+        y: current.box[1] - top,
+        width: current.box[2] - current.box[0],
+        height: current.box[3] - current.box[1],
+        baseline: current.baseline - top,
+        size: current.size,
+        color: current.color,
+        fontName: named.fontName,
+        fontFamily: named.fontFamily,
+        bold: named.bold || current.font.isBold(),
+        italic: named.italic || current.font.isItalic(),
+        serif: current.font.isSerif(),
+        monospace: current.font.isMono(),
+        block,
+        line,
+      });
+    };
+    structured.walk({
+      beginTextBlock: () => {
+        flush();
+        block += 1;
+      },
+      beginLine: () => {
+        flush();
+        line += 1;
+      },
+      onChar: (char, origin, font, size, quad, color) => {
+        const xs = [quad[0], quad[2], quad[4], quad[6]];
+        const ys = [quad[1], quad[3], quad[5], quad[7]];
+        const box: Mupdf.Rect = [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+        const current = run as Run | null;
+        if (!char.trim()) {
+          if (current) current.space += char;
+          return;
+        }
+        const hex = extractedColor(color);
+        const key = `${font.getName()}\u0000${Math.round(size * 100)}\u0000${hex}`;
+        // A wide gap starts a new span, so columns on one line stay apart.
+        const gap = current ? box[0] - current.box[2] : 0;
+        if (current && current.key === key && gap < size * 1.5) {
+          current.text += (current.space ? " " : gap > size * 0.2 ? " " : "") + char;
+          current.space = "";
+          current.box = [Math.min(current.box[0], box[0]), Math.min(current.box[1], box[1]), Math.max(current.box[2], box[2]), Math.max(current.box[3], box[3])];
+          return;
+        }
+        flush();
+        run = { key, text: char, box, baseline: origin[1], size, color: hex, font, space: "" };
+      },
+      endLine: flush,
+      onImageBlock: (bbox, _transform, image) => {
+        let pixmap = image.toPixmap();
+        const colorspace = pixmap.getColorSpace();
+        if (colorspace && !colorspace.isRGB() && !colorspace.isGray()) {
+          const converted = pixmap.convertToColorSpace(mupdf.ColorSpace.DeviceRGB, true);
+          pixmap.destroy();
+          pixmap = converted;
+        }
+        const photo = !pixmap.getAlpha() && pixmap.getWidth() * pixmap.getHeight() > 40_000;
+        layout.images.push({
+          x: bbox[0] - left,
+          y: bbox[1] - top,
+          width: bbox[2] - bbox[0],
+          height: bbox[3] - bbox[1],
+          mimeType: photo ? "image/jpeg" : "image/png",
+          data: copyBytes(photo ? pixmap.asJPEG(88) : pixmap.asPNG()),
+        });
+        pixmap.destroy();
+      },
+      onVector: (bbox, flags, color) => {
+        if (!flags.isRectangle) return;
+        layout.rects.push({ x: bbox[0] - left, y: bbox[1] - top, width: bbox[2] - bbox[0], height: bbox[3] - bbox[1], color: extractedColor(color), stroked: flags.isStroked });
+      },
+    });
+    flush();
+    structured.destroy();
+
+    // Tables come from their ruling lines; MuPDF's guesses for tables
+    // without rules also match ordinary paragraphs, so they are not used.
+    const tablesOf = (options: string, ruled: boolean) => {
+      const hunted = page.toStructuredText(options);
+      const found: LayoutTable[] = [];
+      const visit = (node: unknown) => {
+        if (!node || typeof node !== "object") return;
+        const item = node as { type?: string; xpos?: number[]; ypos?: number[]; blocks?: unknown[]; contents?: unknown[] };
+        if (item.type === "grid" && item.xpos && item.ypos && item.xpos.length > 2 && item.ypos.length > 2)
+          found.push({ columns: item.xpos.map((x) => x - left), rows: item.ypos.map((y) => y - top), ruled });
+        (item.blocks ?? item.contents ?? []).forEach(visit);
+      };
+      try {
+        visit(JSON.parse(hunted.asJSON()));
+      } finally {
+        hunted.destroy();
+      }
+      return found;
+    };
+    layout.tables = tablesOf("table-hunt,vectors", true);
+    page.destroy();
+    return layout;
+  };
+
   /**
    * MuPDF's rearrangePages also strips the catalog down to its page tree and
    * outline, losing the form, language, viewer settings and named
@@ -1867,6 +1988,66 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
       try {
         addImagePages(target, images, pageSize);
         return copyBytes(target.saveToBuffer("garbage=3,compress=yes").asUint8Array());
+      } finally {
+        target.destroy();
+      }
+    },
+
+    async analyzeBytes(bytes, pages) {
+      const target = open(new Uint8Array(bytes));
+      try {
+        const indexes = pages ?? Array.from({ length: target.countPages() }, (_, index) => index);
+        return indexes.map((index) => analyzePage(target, index));
+      } finally {
+        target.destroy();
+      }
+    },
+
+    async htmlToPdf(parts) {
+      if (!parts.length) throw new Error("There is nothing to lay out.");
+      const buffer = new mupdf.Buffer();
+      const writer = new mupdf.DocumentWriter(buffer, "pdf", "compress");
+      let pages = 0;
+      try {
+        for (const part of parts) {
+          const html = mupdf.Document.openDocument(new TextEncoder().encode(part.html), "text/html");
+          try {
+            html.layout(part.width, part.height, 11);
+            for (let index = 0; index < html.countPages(); index += 1) {
+              const page = html.loadPage(index);
+              const device = writer.beginPage([0, 0, part.width, part.height]);
+              page.run(device, mupdf.Matrix.identity);
+              writer.endPage();
+              page.destroy();
+              pages += 1;
+            }
+          } finally {
+            html.destroy();
+          }
+        }
+      } finally {
+        writer.close();
+      }
+      if (!pages) throw new Error("The document has no pages.");
+      const bytes = copyBytes(buffer.asUint8Array());
+      buffer.destroy();
+      return bytes;
+    },
+
+    async renderBytesWithoutText(bytes, index, scale) {
+      const target = open(new Uint8Array(bytes));
+      try {
+        const page = target.loadPage(index);
+        const annotation = page.createAnnotation("Redact");
+        annotation.setRect(page.getBounds());
+        annotation.update();
+        const [image, lineArt, text] = redactionOptions(mupdf, "eraseText");
+        page.applyRedactions(false, image, lineArt, text);
+        const pixmap = page.toPixmap([scale, 0, 0, scale, 0, 0], mupdf.ColorSpace.DeviceRGB, false, true);
+        const png = copyBytes(pixmap.asPNG());
+        pixmap.destroy();
+        page.destroy();
+        return png;
       } finally {
         target.destroy();
       }

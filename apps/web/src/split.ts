@@ -47,10 +47,11 @@ export function crc32(bytes: Uint8Array) {
 }
 
 /**
- * A ZIP archive with the files stored uncompressed. PDFs are already
- * compressed internally, so deflating them again would gain little.
+ * A ZIP archive. Files are stored as they are unless `deflated` holds their
+ * raw-deflate compressed bytes; PDFs are already compressed internally, so
+ * they are simply stored.
  */
-export function createZip(files: { name: string; data: Uint8Array }[], date = new Date()) {
+export function createZip(files: { name: string; data: Uint8Array; deflated?: Uint8Array }[], date = new Date()) {
   const encoder = new TextEncoder();
   const time = (date.getHours() << 11) | (date.getMinutes() << 5) | (date.getSeconds() >> 1);
   const day = ((Math.max(1980, date.getFullYear()) - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate();
@@ -60,6 +61,7 @@ export function createZip(files: { name: string; data: Uint8Array }[], date = ne
   for (const file of files) {
     const name = encoder.encode(file.name);
     const crc = crc32(file.data);
+    const stored = file.deflated ?? file.data;
     const header = (signature: number, central: boolean) => {
       const buffer = new Uint8Array((central ? 46 : 30) + name.length);
       const view = new DataView(buffer.buffer);
@@ -70,11 +72,11 @@ export function createZip(files: { name: string; data: Uint8Array }[], date = ne
       if (central) u16(20);
       u16(20); // version needed
       u16(0x0800); // UTF-8 names
-      u16(0); // stored
+      u16(file.deflated ? 8 : 0); // deflate or store
       u16(time);
       u16(day);
       u32(crc);
-      u32(file.data.length);
+      u32(stored.length);
       u32(file.data.length);
       u16(name.length);
       u16(0); // extra
@@ -89,9 +91,9 @@ export function createZip(files: { name: string; data: Uint8Array }[], date = ne
       return buffer;
     };
     const local = header(0x04034b50, false);
-    locals.push(local, file.data);
+    locals.push(local, stored);
     centrals.push(header(0x02014b50, true));
-    offset += local.length + file.data.length;
+    offset += local.length + stored.length;
   }
   const directorySize = centrals.reduce((sum, item) => sum + item.length, 0);
   const end = new Uint8Array(22);
