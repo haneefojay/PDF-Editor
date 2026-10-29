@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@capacitor-community/text-to-speech':
+        specifier: 6.1.0
+        version: 6.1.0(@capacitor/core@7.6.9)
       '@capacitor/app':
         specifier: ^7.1.2
         version: 7.1.2(@capacitor/core@7.6.9)
@@ -45,6 +48,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@capacitor-community/text-to-speech':
+        specifier: 6.1.0
+        version: 6.1.0(@capacitor/core@7.6.9)
       '@capacitor/app':
         specifier: ^7.1.2
         version: 7.1.2(@capacitor/core@7.6.9)
@@ -283,6 +289,11 @@ packages:
   '@babel/types@7.29.8':
     resolution: {integrity: sha512-Vj1jF3cPfxg7OAfoI7QnVKLoILlm2JF9pnVHrX8qx7AHMiYWT+NDAA7jChlNgRS4WTLc/fD1lXLmPixluj+3Gg==}
     engines: {node: '>=6.9.0'}
+
+  '@capacitor-community/text-to-speech@6.1.0':
+    resolution: {integrity: sha512-K9kbQm7BEkUGhZQYMrPaLfHTbOjQPtXZyQTtZxR+lNJyl1pbSFWwRmK3PCIa5C5M2HLf3iPgj/vTaMvMxlk1Ag==}
+    peerDependencies:
+      '@capacitor/core': '>=7.0.0'
 
   '@capacitor/android@7.6.9':
     resolution: {integrity: sha512-jvfU42aOuj92/KJqRscfDm+5612WzJainFL09xjJgD9oI3OMXN4PBfccn8Ig9i8x7bkVqZv/XNwFshiIRqmggg==}
@@ -2092,6 +2103,10 @@ snapshots:
     dependencies:
       '@babel/helper-string-parser': 7.29.7
       '@babel/helper-validator-identifier': 7.29.7
+
+  '@capacitor-community/text-to-speech@6.1.0(@capacitor/core@7.6.9)':
+    dependencies:
+      '@capacitor/core': 7.6.9
 
   '@capacitor/android@7.6.9(@capacitor/core@7.6.9)':
     dependencies:

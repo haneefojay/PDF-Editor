@@ -51,6 +51,8 @@ import {
   Lock,
   Maximize,
   Moon,
+  Volume2,
+  ChevronsDown,
   Merge,
   MessageSquareText,
   MousePointer2,
@@ -123,6 +125,8 @@ import { layoutOverlays } from "./layout";
 import { findParagraph, reflowWidth } from "./paragraphs";
 import { createZip, describeGroup, parseRanges, splitEvery } from "./split";
 import { ScanSession, type ScanResult } from "./scan/ScanSession";
+import { AutoScrollBar, ReadAloudBar } from "./ReadingBar";
+import { sentencesOf, type Box, type Sentence } from "./readAloud";
 import { PAGE_SIZES, mapCrop, mapOverlay, mmToPoints, pointsToMm, presetOf, targetSize, type Orientation, type PageSizePreset } from "./pageSize";
 
 type Engine = ReturnType<typeof createPdfEngine>;
@@ -234,6 +238,9 @@ export function App() {
   const [scanning, setScanning] = useState<null | { at: number | null }>(null);
   const [pendingOcr, setPendingOcr] = useState<null | { sources: number[]; language: OcrLanguage }>(null);
   const scanBack = useRef<(() => boolean) | null>(null);
+  const [readingMode, setReadingMode] = useState<null | "speak" | "scroll">(null);
+  const [readingSentence, setReadingSentence] = useState<{ source: number; boxes: Box[] } | null>(null);
+  const sourceLines = useRef(new Map<number, Promise<PositionedTextLine[]>>());
   const [splitMode, setSplitMode] = useState<"every" | "ranges">("every");
   const [splitEveryDraft, setSplitEveryDraft] = useState(1);
   const [splitRangesDraft, setSplitRangesDraft] = useState("");
@@ -585,6 +592,7 @@ export function App() {
   currentBytes.current = openBytesRef;
   useEffect(() => {
     pageDataLoading.current.clear();
+    sourceLines.current.clear();
     setPageData(new Map());
     if (!openBytesRef) return;
     let active = true;
@@ -754,6 +762,11 @@ export function App() {
     let dispose = () => undefined;
     void registerBackHandler(() => {
       if (scanBack.current) return scanBack.current();
+      if (readingMode) {
+        setReadingMode(null);
+        setReadingSentence(null);
+        return true;
+      }
       if (passwordRequest) {
         answerPassword(null);
         return true;
@@ -782,7 +795,7 @@ export function App() {
     });
     return () => dispose();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, dialog, showComments, originalEdit, editingId, selectedId, passwordRequest, ocrRunning, closeDocument]);
+  }, [open, dialog, showComments, originalEdit, editingId, selectedId, passwordRequest, ocrRunning, closeDocument, readingMode]);
 
   const generated = useMemo(() => layoutOverlays(doc.layout, doc.pageOrder, open?.pages ?? []), [doc.layout, doc.pageOrder, open?.pages]);
   const current = useMemo(() => doc.overlays.filter((item) => item.page === sourcePage), [doc.overlays, sourcePage]);
@@ -1703,6 +1716,50 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingOcr, open, ocrRunning]);
 
+  /**
+   * What read aloud says for a page: the file's text minus anything erased by
+   * an edit, followed by text added on the page (including OCR text).
+   */
+  const sentencesFor = useCallback(
+    async (index: number): Promise<Sentence[]> => {
+      const source = doc.pageOrder[index];
+      if (source === undefined) return [];
+      let lines = sourceLines.current.get(source);
+      if (!lines) {
+        lines = api().extractTextLines(source);
+        sourceLines.current.set(source, lines);
+      }
+      const onPage = doc.overlays.filter((overlay) => overlay.page === source);
+      const erased = onPage.filter((overlay) => overlay.kind === "redact");
+      const kept = (await lines).filter((line) => {
+        const cx = line.x + line.width / 2;
+        const cy = line.y + line.height / 2;
+        return !erased.some((box) => box.kind === "redact" && cx >= box.x && cx <= box.x + box.width && cy >= box.y && cy <= box.y + box.height);
+      });
+      const added = onPage
+        .filter((overlay): overlay is TextOverlay => overlay.kind === "text" && overlay.text.trim() !== "")
+        .sort((a, b) => a.y - b.y || a.x - b.x)
+        .map((overlay, order): PositionedTextLine => ({ ...overlay, id: overlay.id, text: overlay.text.replace(/\n/g, " "), baseline: overlay.y + overlay.height, block: 100_000 + order, line: 100_000 + order, fontName: overlay.fontName ?? overlay.fontFamily }));
+      return sentencesOf([...kept, ...added]);
+    },
+    [doc.pageOrder, doc.overlays],
+  );
+  const showSentence = useCallback(
+    (index: number, sentence: Sentence | null) => {
+      const source = doc.pageOrder[index];
+      if (!sentence || source === undefined) {
+        setReadingSentence(null);
+        return;
+      }
+      setReadingSentence({ source, boxes: sentence.boxes });
+      const bottom = Math.max(...sentence.boxes.map((box) => box.y + box.height));
+      viewRef.current?.reveal(index, sentence.top, bottom);
+      viewRef.current?.markCurrent(index);
+      setPage(index);
+    },
+    [doc.pageOrder, setPage],
+  );
+
   const finishScan = async (result: ScanResult, at: number | null) => {
     setScanning(null);
     const language = result.ocr ? (result.language as OcrLanguage) : undefined;
@@ -2191,6 +2248,8 @@ export function App() {
           title: "Change how pages look while reading (not the exported file)",
           active: readingTheme !== "day",
         },
+        { key: "readAloud", label: "Read aloud", Icon: Volume2, action: () => setReadingMode("speak"), title: "Read the document aloud from this page", active: readingMode === "speak" },
+        { key: "autoScroll", label: "Auto-scroll", Icon: ChevronsDown, action: () => setReadingMode("scroll"), title: "Scroll through the document hands-free", active: readingMode === "scroll" },
         { key: "print", label: "Print", Icon: Printer, action: () => void printDocument(), title: "Print with all edits (Ctrl+P)" },
         { key: "convert", label: "Convert", Icon: ArrowLeftRight, action: () => setDialog("convert"), title: "Convert to Word, Excel, PowerPoint or text" },
         { key: "text", label: "Export text", Icon: FileText, action: () => void exportText(), title: "Save all text as a .txt file" },
@@ -2816,6 +2875,7 @@ export function App() {
                         selectedId={selectedId}
                         editingId={editingId}
                         highlight={searchHighlight?.sourcePage === source ? searchHighlight.rect : null}
+                        reading={readingSentence?.source === source ? readingSentence.boxes : null}
                         page={source}
                         onSelect={(id) => {
                           if (originalEdit) commitOriginalEdit(originalEdit, false);
@@ -3693,6 +3753,19 @@ export function App() {
           </dl>
         </Modal>
       )}
+      {readingMode === "speak" && (
+        <ReadAloudBar
+          startPage={page}
+          pageCount={doc.pageOrder.length}
+          sentencesFor={sentencesFor}
+          onSentence={showSentence}
+          onClose={() => {
+            setReadingMode(null);
+            setReadingSentence(null);
+          }}
+        />
+      )}
+      {readingMode === "scroll" && <AutoScrollBar target={() => stageRef.current} onClose={() => setReadingMode(null)} />}
       {passwordDialog}
       {toasts}
       {scanner}
