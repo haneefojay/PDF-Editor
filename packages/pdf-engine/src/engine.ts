@@ -1342,6 +1342,7 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
       if (!order.length || new Set(order).size !== order.length || order.some((item) => !valid(item)))
         throw new Error("Export validation failed: page order is invalid.");
       rearrangePages(target, order);
+      if (request.bookmarks) writeOutline(target, request.bookmarks);
 
       let options =
         request.compression === "original"
@@ -1510,6 +1511,67 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
     layout.tables = tablesOf("table-hunt,vectors", true);
     page.destroy();
     return layout;
+  };
+
+  /** Writes a fresh outline: nested entries pointing at pages or web links. */
+  const writeOutline = (target: Mupdf.PDFDocument, bookmarks: NonNullable<ExportRequest["bookmarks"]>) => {
+    const root = target.getTrailer().get("Root").resolve();
+    root.delete("Outlines");
+    const count = target.countPages();
+    const usable = bookmarks.filter((item) => item.title.trim() && (item.uri || (item.page !== null && item.page >= 0 && item.page < count)));
+    if (!usable.length) return;
+    type Node = { object: Mupdf.PDFObject; children: Node[] };
+    const outlines = target.addObject(target.newDictionary());
+    outlines.put("Type", target.newName("Outlines"));
+    const top: Node = { object: outlines, children: [] };
+    const stack: Node[] = [top];
+    for (const item of usable) {
+      // A level can only go one deeper than the entry before it.
+      const depth = Math.min(item.depth, stack.length - 1);
+      stack.length = depth + 1;
+      const parent = stack[depth]!;
+      const entry = target.addObject(target.newDictionary());
+      entry.put("Title", target.newString(item.title.trim()));
+      entry.put("Parent", parent.object);
+      if (item.uri) {
+        const action = target.newDictionary();
+        action.put("S", target.newName("URI"));
+        action.put("URI", target.newString(item.uri));
+        entry.put("A", action);
+      } else {
+        const page = target.loadPage(item.page!);
+        const box = page.getObject().getInheritable("MediaBox");
+        const destination = target.newArray();
+        destination.push(page.getObject());
+        if (item.top !== undefined && box.isArray()) {
+          destination.push(target.newName("XYZ"));
+          destination.push(target.newNull());
+          destination.push(box.get(3).asNumber() - item.top * (box.get(3).asNumber() - box.get(1).asNumber()));
+          destination.push(target.newNull());
+        } else destination.push(target.newName("Fit"));
+        entry.put("Dest", destination);
+        page.destroy();
+      }
+      const node: Node = { object: entry, children: [] };
+      parent.children.push(node);
+      stack.push(node);
+    }
+    const link = (node: Node): number => {
+      node.children.forEach((child, index) => {
+        if (index) child.object.put("Prev", node.children[index - 1]!.object);
+        if (index < node.children.length - 1) child.object.put("Next", node.children[index + 1]!.object);
+      });
+      if (node.children.length) {
+        node.object.put("First", node.children[0]!.object);
+        node.object.put("Last", node.children.at(-1)!.object);
+      }
+      // Entries start open, so their count is every entry below them.
+      const total = node.children.reduce((sum, child) => sum + 1 + link(child), 0);
+      if (total) node.object.put("Count", total);
+      return total;
+    };
+    link(top);
+    root.put("Outlines", outlines);
   };
 
   /**

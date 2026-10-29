@@ -2708,3 +2708,53 @@ span.scanIcon {
 .app.phone .readingBar .voiceSelect {
   display: none;
 }
+
+.outlineTools {
+  display: flex;
+  gap: 6px;
+  padding: 0 4px 8px;
+}
+.outlineTools button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--raised);
+  color: var(--text);
+  font-size: 13px;
+}
+.outlineTools button svg {
+  width: 15px;
+}
+.outlineTools button[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.outlineEdit {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 4px;
+}
+.outlineEdit input {
+  flex: 1;
+  min-width: 0;
+  min-height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+.outlineEdit .iconButton {
+  width: 28px;
+  height: 28px;
+}
+.outlineEdit .iconButton svg {
+  width: 15px;
+}
