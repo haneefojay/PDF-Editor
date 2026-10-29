@@ -23,6 +23,13 @@ A local-first, privacy-first PDF editor for the web and Android, licensed under 
 - Scan several pages in one go, reorder or retake them, then create a PDF or insert them into the open one. Photos from the gallery work too.
 - Optional on-device OCR makes the scan searchable straight away.
 
+**Convert**
+- PDF to Word (.docx) with editable paragraphs, headings, lists, tables and pictures, one Word page per PDF page.
+- PDF to Excel (.xlsx): tables cell for cell, printed numbers stored as numbers with their currency, percent and grouping formats.
+- PDF to PowerPoint (.pptx): one slide per page, pictures and drawings as the slide background, text as editable text boxes.
+- Open Word (.docx) and Excel (.xlsx) files as PDFs, or insert them into an open PDF.
+- Everything converts on the device; the converters load only when first used.
+
 **Comment & review**
 - Highlight, underline, strikeout and squiggly markup that snaps to text lines.
 - Sticky notes, text callouts, stamps, measurements and file attachments.
@@ -72,10 +79,11 @@ The unit tests in `packages/pdf-engine` build real PDFs with MuPDF and inspect w
   - `PageCanvas.tsx`: page interaction
   - `textMetrics.ts`: font-accurate text preview
   - `scan/`: page detection, perspective correction and filters, plus the scanner screen
+  - `convert/`: document structure from PDF pages, and Office readers and writers (DOCX, XLSX, PPTX)
   - `layout.ts`: generated headers and footers
 - `packages/editor-core`: serializable document model, undoable commands, and the text layout shared by the editor and the exporter
 - `packages/pdf-engine`: MuPDF in a Web Worker
-  - `engine.ts`: rendering, text extraction, export and page assembly
+  - `engine.ts`: rendering, text extraction, export, page assembly, page analysis for conversion, and HTML layout for Office files
   - `mupdf.worker.ts`: loads WebAssembly and exposes the engine
 - `docs/adr`: architecture decisions
 
