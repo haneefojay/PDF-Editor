@@ -14,7 +14,10 @@ import type {
   ExportOverlay,
   ExportRequest,
   FormField,
+  OutlineEntry,
   PageImage,
+  PageLink,
+  PageMapping,
   PdfMetadata,
   PdfWorkerApi,
   PositionedTextLine,
@@ -22,6 +25,7 @@ import type {
 } from "./protocol";
 import { PASSWORD_INCORRECT, PASSWORD_REQUIRED } from "./protocol";
 import { bundledFontBase64 } from "./fontData";
+import { blankRanges, findXObjectDraws } from "./contentStream";
 
 type MupdfModule = typeof Mupdf;
 type Matrix = [number, number, number, number, number, number];
@@ -825,10 +829,9 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
     const original: Mupdf.PDFObject[] = [];
     const contents = pageObject.get("Contents");
     if (!contents.isNull()) {
-      const resolved = contents.resolve();
-      if (resolved.isArray())
-        for (let index = 0; index < resolved.length; index += 1)
-          original.push(resolved.get(index));
+      if (contents.isArray())
+        for (let index = 0; index < contents.length; index += 1)
+          original.push(contents.get(index));
       else original.push(contents);
     }
     const array = target.newArray();
@@ -840,6 +843,69 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
     if (drawing.after.length) array.push(wrap(drawing.after));
     pageObject.put("Contents", array);
     page.destroy();
+  };
+
+  /**
+   * Removes the exact `Do` that draws each image covering an area, so the
+   * content behind it survives. Returns the areas no image draw matched.
+   */
+  const removeImageDraws = <T extends { x: number; y: number; width: number; height: number }>(
+    target: Mupdf.PDFDocument,
+    pageIndex: number,
+    areas: T[],
+  ): T[] => {
+    const page = target.loadPage(pageIndex);
+    try {
+      const pageObject = page.getObject();
+      const ctm = page.getTransform() as Matrix;
+      const bounds = page.getBounds();
+      const width = bounds[2] - bounds[0];
+      const height = bounds[3] - bounds[1];
+      const contents = pageObject.get("Contents");
+      if (contents.isNull()) return areas;
+      // Never resolve() stream references: MuPDF.js then drops their data on
+      // a later garbage-collecting save. Indirect objects resolve internally.
+      const streams: Mupdf.PDFObject[] = [];
+      if (contents.isArray()) for (let index = 0; index < contents.length; index += 1) streams.push(contents.get(index));
+      else streams.push(contents);
+      const bytes = streams.map((stream) => new Uint8Array(stream.readStream().asUint8Array()));
+      const xobjects = pageObject.getInheritable("Resources").get("XObject");
+      const draws = findXObjectDraws(bytes).flatMap((draw) => {
+        const object = xobjects.isNull() ? null : xobjects.get(draw.name);
+        if (!object?.isStream() || object.get("Subtype").asName() !== "Image") return [];
+        const toPage = multiply(draw.matrix, ctm);
+        const corners = [apply(toPage, 0, 0), apply(toPage, 1, 0), apply(toPage, 0, 1), apply(toPage, 1, 1)];
+        const xs = corners.map(([x]) => (x - bounds[0]) / width);
+        const ys = corners.map(([, y]) => (y - bounds[1]) / height);
+        const box = { x: Math.min(...xs), y: Math.min(...ys), width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) };
+        return [{ ...draw, box }];
+      });
+      const overlap = (a: { x: number; y: number; width: number; height: number }, b: typeof a) => {
+        const w = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x);
+        const h = Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y);
+        if (w <= 0 || h <= 0) return 0;
+        const intersection = w * h;
+        return intersection / (a.width * a.height + b.width * b.height - intersection);
+      };
+      const used = new Set<(typeof draws)[number]>();
+      const unmatched: T[] = [];
+      for (const area of areas) {
+        const best = draws.filter((draw) => !used.has(draw)).sort((a, b) => overlap(b.box, area) - overlap(a.box, area))[0];
+        if (best && overlap(best.box, area) > 0.9) used.add(best);
+        else unmatched.push(area);
+      }
+      if (!used.size) return areas;
+      const array = target.newArray();
+      bytes.forEach((data, index) => {
+        const ranges = [...used].filter((draw) => draw.stream === index);
+        // A new stream object, so content shared with other pages is untouched.
+        array.push(ranges.length ? target.addStream(blankRanges(data, ranges), target.newDictionary()) : streams[index]!);
+      });
+      pageObject.put("Contents", array);
+      return unmatched;
+    } finally {
+      page.destroy();
+    }
   };
 
   const exportDocument = async (request: ExportRequest) => {
@@ -909,6 +975,12 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
         redactions.set(overlay.page, byMode);
       }
       for (const [pageIndex, byMode] of redactions) {
+        const images = byMode.get("eraseImage");
+        if (images) {
+          const remaining = removeImageDraws(target, pageIndex, images);
+          if (remaining.length) byMode.set("eraseImage", remaining);
+          else byMode.delete("eraseImage");
+        }
         for (const [mode, items] of byMode) {
           const page = target.loadPage(pageIndex);
           for (const item of items) {
@@ -1057,6 +1129,7 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
           annotation.setInkList([overlay.points.map((point) => fitzPoint(point, frame))]);
           annotation.setColor(parseColor(overlay.color));
           annotation.setBorderWidth(overlay.width);
+          if (overlay.kind === "ink" && overlay.opacity !== undefined && overlay.opacity < 1) annotation.setOpacity(overlay.opacity);
           annotation.setFlags(mupdf.PDFAnnotation.IS_PRINT);
           annotation.update();
           annotation.destroy();
@@ -1265,7 +1338,7 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
       const order = request.pageOrder;
       if (!order.length || new Set(order).size !== order.length || order.some((item) => !valid(item)))
         throw new Error("Export validation failed: page order is invalid.");
-      target.rearrangePages(order);
+      rearrangePages(target, order);
 
       let options =
         request.compression === "original"
@@ -1315,6 +1388,150 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
     } finally {
       target.destroy();
     }
+  };
+
+  /**
+   * MuPDF's rearrangePages also strips the catalog down to its page tree and
+   * outline, losing the form, language, viewer settings and named
+   * destinations. Put those back, keeping only form fields still on a page.
+   */
+  const rearrangePages = (target: Mupdf.PDFDocument, order: number[]) => {
+    const catalog = () => target.getTrailer().get("Root").resolve();
+    const saved: [string, Mupdf.PDFObject][] = [];
+    catalog().forEach((value, key) => {
+      if (typeof key === "string" && !["Type", "Pages", "Outlines", "StructTreeRoot", "MarkInfo"].includes(key)) saved.push([key, value]);
+    });
+    target.rearrangePages(order);
+    const root = catalog();
+    for (const [key, value] of saved) if (root.get(key).isNull()) root.put(key, value);
+    const form = root.get("AcroForm");
+    if (form.isNull() || form.get("Fields").isNull()) return;
+    const present = new Set<number>();
+    for (let index = 0; index < target.countPages(); index += 1) {
+      const annotations = target.loadPage(index).getObject().get("Annots");
+      for (let item = 0; item < annotations.length; item += 1) {
+        let field = annotations.get(item);
+        if (field.get("Subtype").asName() !== "Widget") continue;
+        while (!field.get("Parent").isNull()) field = field.get("Parent");
+        if (field.isIndirect()) present.add(field.asIndirect());
+      }
+    }
+    const before = form.get("Fields");
+    const fields = target.newArray();
+    for (let item = 0; item < before.length; item += 1) {
+      const field = before.get(item);
+      if (!field.isIndirect() || present.delete(field.asIndirect())) fields.push(field);
+    }
+    present.forEach((number) => fields.push(target.newIndirect(number)));
+    form.put("Fields", fields);
+  };
+
+  /**
+   * Copies a page to the end of `target` together with its annotations and
+   * form widgets, which MuPDF's graftPage leaves behind. `source` must be a
+   * throwaway copy: annotation /P links are removed from it before grafting.
+   */
+  const graftWithAnnotations = (target: Mupdf.PDFDocument, source: Mupdf.PDFDocument, index: number, map: Mupdf.PDFGraftMap) => {
+    map.graftPage(-1, source, index);
+    const sourcePage = source.loadPage(index);
+    const annotations = sourcePage.getObject().get("Annots");
+    sourcePage.destroy();
+    if (annotations.isNull() || !annotations.length) return;
+    // Without their /P links the annotations graft without dragging the
+    // source page (and through it the whole source page tree) along.
+    for (let item = 0; item < annotations.length; item += 1) {
+      const annotation = annotations.get(item);
+      annotation.delete("P");
+      if (!annotation.get("Popup").isNull()) annotation.get("Popup").delete("P");
+    }
+    const page = target.loadPage(target.countPages() - 1);
+    const pageObject = page.getObject();
+    const copied = map.graftObject(annotations);
+    const fields = new Set<number>();
+    for (let item = 0; item < copied.length; item += 1) {
+      const annotation = copied.get(item);
+      annotation.put("P", pageObject);
+      if (!annotation.get("Popup").isNull()) annotation.get("Popup").put("P", pageObject);
+      if (annotation.get("Subtype").asName() !== "Widget") continue;
+      let field = annotation;
+      while (!field.get("Parent").isNull()) field = field.get("Parent");
+      if (field.isIndirect()) fields.add(field.asIndirect());
+    }
+    pageObject.put("Annots", copied);
+    page.destroy();
+    if (!fields.size) return;
+    const list = acroFormFields(target);
+    for (let item = 0; item < list.length; item += 1) if (list.get(item).isIndirect()) fields.delete(list.get(item).asIndirect());
+    fields.forEach((number) => list.push(target.newIndirect(number)));
+    const sourceForm = source.getTrailer().get("Root").get("AcroForm");
+    const targetForm = target.getTrailer().get("Root").get("AcroForm");
+    for (const key of ["DR", "DA"])
+      if (!sourceForm.isNull() && targetForm.get(key).isNull() && !sourceForm.get(key).isNull())
+        targetForm.put(key, map.graftObject(sourceForm.get(key)));
+  };
+
+  /**
+   * Resizes a page in place: its content is scaled and centred into the new
+   * display size, and annotation geometry is transformed to match.
+   */
+  const resizePage = (target: Mupdf.PDFDocument, pageIndex: number, width: number, height: number) => {
+    let page = target.loadPage(pageIndex);
+    const before = frameOf(page);
+    const pageObject = page.getObject();
+    const rotate = pageObject.getInheritable("Rotate");
+    const sideways = ((((rotate.isNumber() ? rotate.asNumber() : 0) % 360) + 360) % 360) % 180 !== 0;
+    const scale = Math.min(width / before.width, height / before.height);
+    const dx = (width - before.width * scale) / 2;
+    const dy = (height - before.height * scale) / 2;
+    const box = target.newArray();
+    [0, 0, sideways ? height : width, sideways ? width : height].forEach((value) => box.push(value));
+    pageObject.put("MediaBox", box);
+    for (const key of ["CropBox", "TrimBox", "BleedBox", "ArtBox"]) pageObject.delete(key);
+    page.destroy();
+    page = target.loadPage(pageIndex);
+    const after = frameOf(page);
+    const map = multiply(multiply(invert(before.toUser), [scale, 0, 0, scale, dx, dy]), after.toUser);
+    const contents = pageObject.get("Contents");
+    const array = target.newArray();
+    array.push(target.addStream(new TextEncoder().encode(`q ${matrixString(map)} cm`), target.newDictionary()));
+    if (!contents.isNull()) {
+      if (contents.isArray()) for (let index = 0; index < contents.length; index += 1) array.push(contents.get(index));
+      else array.push(contents);
+    }
+    array.push(target.addStream(new TextEncoder().encode("Q"), target.newDictionary()));
+    pageObject.put("Contents", array);
+    // Annotation appearances follow their Rect, so transforming geometry suffices.
+    const transformPairs = (values: Mupdf.PDFObject) => {
+      for (let index = 0; index + 1 < values.length; index += 2) {
+        const [x, y] = apply(map, values.get(index).asNumber(), values.get(index + 1).asNumber());
+        values.put(index, x);
+        values.put(index + 1, y);
+      }
+    };
+    const annotations = pageObject.get("Annots");
+    for (let index = 0; !annotations.isNull() && index < annotations.length; index += 1) {
+      const annotation = annotations.get(index);
+      const rect = annotation.get("Rect");
+      if (rect.isArray() && rect.length === 4) {
+        transformPairs(rect);
+        const [x0, y0, x1, y1] = [0, 1, 2, 3].map((item) => rect.get(item).asNumber()) as [number, number, number, number];
+        [Math.min(x0, x1), Math.min(y0, y1), Math.max(x0, x1), Math.max(y0, y1)].forEach((value, item) => rect.put(item, value));
+      }
+      for (const key of ["QuadPoints", "Vertices", "L", "CL"]) {
+        const values = annotation.get(key);
+        if (values.isArray()) transformPairs(values);
+      }
+      const ink = annotation.get("InkList");
+      for (let stroke = 0; ink.isArray() && stroke < ink.length; stroke += 1) transformPairs(ink.get(stroke));
+    }
+    page.destroy();
+    return {
+      scale,
+      scaleX: (before.width * scale) / width,
+      scaleY: (before.height * scale) / height,
+      offsetX: dx / width,
+      offsetY: dy / height,
+    };
   };
 
   /** Adds one page per image, sized to A4 in the image's orientation. */
@@ -1377,6 +1594,7 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
       const structured = page.toStructuredText("preserve-whitespace");
       const lines: PositionedTextLine[] = [];
       let lineIndex = -1;
+      let blockIndex = -1;
       let runIndex = 0;
       type Run = {
         key: string;
@@ -1408,6 +1626,8 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
           width: Math.max(0.005, (x1 - x0) / pageWidth),
           height: Math.max(0.005, (y1 - y0) / pageHeight),
           baseline: (current.baseline - bounds[1]) / pageHeight,
+          block: blockIndex,
+          line: lineIndex,
           size: current.size,
           color: current.color,
           alignment: "left",
@@ -1418,6 +1638,10 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
         });
       };
       structured.walk({
+        beginTextBlock: () => {
+          flush();
+          blockIndex += 1;
+        },
         beginLine: () => {
           flush();
           lineIndex += 1;
@@ -1487,6 +1711,92 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
       return images;
     },
 
+    async listPageImages(index) {
+      const page = requireDoc().loadPage(index);
+      const bounds = page.getBounds();
+      const width = bounds[2] - bounds[0];
+      const height = bounds[3] - bounds[1];
+      const structured = page.toStructuredText("preserve-images");
+      const images: Omit<PageImage, "dataUrl">[] = [];
+      let imageIndex = 0;
+      structured.walk({
+        onImageBlock: (bbox, _transform, image) => {
+          images.push({
+            id: `${index}-${imageIndex++}`,
+            x: (bbox[0] - bounds[0]) / width,
+            y: (bbox[1] - bounds[1]) / height,
+            width: (bbox[2] - bbox[0]) / width,
+            height: (bbox[3] - bbox[1]) / height,
+            pixelWidth: image.getWidth(),
+            pixelHeight: image.getHeight(),
+          });
+        },
+      });
+      structured.destroy();
+      page.destroy();
+      return images;
+    },
+
+    async getOutline() {
+      const target = requireDoc();
+      const entries: OutlineEntry[] = [];
+      const walk = (items: ReturnType<Mupdf.Document["loadOutline"]> | undefined, depth: number) => {
+        for (const item of items ?? []) {
+          let page: number | null = item.page ?? null;
+          if (page === null && item.uri && !/^[a-z][a-z0-9+.-]*:/i.test(item.uri)) {
+            try {
+              page = target.resolveLink(item.uri);
+            } catch {
+              page = null;
+            }
+          }
+          entries.push({
+            title: (item.title ?? "").trim() || "Untitled",
+            page: page !== null && page >= 0 && page < target.countPages() ? page : null,
+            depth,
+            ...(item.uri && /^[a-z][a-z0-9+.-]*:/i.test(item.uri) ? { uri: item.uri } : {}),
+          });
+          walk(item.down, depth + 1);
+        }
+      };
+      walk(target.loadOutline(), 0);
+      return entries;
+    },
+
+    async getLinks(index) {
+      const target = requireDoc();
+      const page = target.loadPage(index);
+      const bounds = page.getBounds();
+      const width = bounds[2] - bounds[0];
+      const height = bounds[3] - bounds[1];
+      const links: PageLink[] = [];
+      for (const link of page.getLinks()) {
+        const [x0, y0, x1, y1] = link.getBounds();
+        const area = { x: (x0 - bounds[0]) / width, y: (y0 - bounds[1]) / height, width: (x1 - x0) / width, height: (y1 - y0) / height };
+        if (link.isExternal()) {
+          const uri = link.getURI();
+          // Only web and mail links are offered; other schemes are ignored.
+          if (/^(https?|mailto):/i.test(uri)) links.push({ ...area, uri });
+        } else {
+          try {
+            const destination = target.resolveLinkDestination(link);
+            if (destination.page >= 0 && destination.page < target.countPages()) {
+              const targetPage = target.loadPage(destination.page);
+              const targetBounds = targetPage.getBounds();
+              targetPage.destroy();
+              const top = Number.isFinite(destination.y) ? (destination.y - targetBounds[1]) / (targetBounds[3] - targetBounds[1]) : 0;
+              links.push({ ...area, page: destination.page, top: Math.min(1, Math.max(0, top)) });
+            }
+          } catch {
+            // Broken destinations are skipped rather than failing the page.
+          }
+        }
+        link.destroy();
+      }
+      page.destroy();
+      return links;
+    },
+
     exportDocument,
 
     async appendPages(operation: AppendOperation) {
@@ -1494,7 +1804,23 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
       const target = open(sourceBytes!, password);
       const firstIndex = target.countPages();
       try {
+        const mappings: PageMapping[] = [];
         if (operation.type === "images") addImagePages(target, operation.images);
+        else if (operation.type === "resize") {
+          const source = open(sourceBytes!, password);
+          const map = target.newGraftMap();
+          try {
+            for (const index of operation.sources) {
+              if (index < 0 || index >= source.countPages()) throw new Error("A page to resize is unavailable.");
+              graftWithAnnotations(target, source, index, map);
+              const copy = target.countPages() - 1;
+              mappings.push({ source: index, target: copy, ...resizePage(target, copy, operation.width, operation.height) });
+            }
+          } finally {
+            map.destroy();
+            source.destroy();
+          }
+        }
         else if (operation.type === "blank") {
           target.insertPage(
             -1,
@@ -1505,15 +1831,17 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
             operation.type === "pdf"
               ? open(new Uint8Array(operation.bytes), operation.password)
               : open(sourceBytes!, password);
+          const map = target.newGraftMap();
           try {
             if (operation.type === "copy") {
               if (operation.source < 0 || operation.source >= source.countPages())
                 throw new Error("The page to duplicate is unavailable.");
-              target.graftPage(-1, source, operation.source);
+              graftWithAnnotations(target, source, operation.source, map);
             } else
               for (let index = 0; index < source.countPages(); index += 1)
-                target.graftPage(-1, source, index);
+                graftWithAnnotations(target, source, index, map);
           } finally {
+            map.destroy();
             source.destroy();
           }
         }
@@ -1523,7 +1851,7 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
         const needsSecret = reopened.needsPassword();
         reopened.destroy();
         const info = loadInto(bytes, needsSecret ? password : undefined);
-        return { ...info, bytes: copyBytes(bytes), firstIndex, count };
+        return { ...info, bytes: copyBytes(bytes), firstIndex, count, ...(mappings.length ? { mappings } : {}) };
       } finally {
         target.destroy();
       }

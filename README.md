@@ -4,9 +4,15 @@ A local-first, privacy-first PDF editor for the web and Android, licensed under 
 
 ## What it does
 
+**Read**
+- Continuous scrolling through the whole document; only pages near the screen are rendered, so long files stay fast.
+- Navigate with the document outline (bookmarks), clickable internal and web links, thumbnails and search.
+- Night and sepia reading themes, plus full-screen reading on phones (tap the page).
+
 **Edit**
-- Click any line of existing text to change it, keeping its font, size and colour. Tables, rules and backgrounds around the text are left intact.
-- Add text, images, shapes (with fill), lines and arrows, and freehand drawing.
+- Click existing text to change it, keeping its font, size and colour. Whole paragraphs reflow inside their original width; tables, rules and backgrounds around the text are left intact.
+- Move, resize, rotate or delete images that are part of the page, without leaving a hole.
+- Add text, images, shapes (with fill), lines and arrows, freehand drawing and a highlighter pen; erase strokes with the eraser.
 - Text is previewed with the exact fonts and line breaks used in the exported PDF. Unicode text (accents, Greek, Cyrillic, €…) is embedded properly, and characters no bundled font can draw are reported instead of silently replaced.
 - Find & replace across the whole document.
 - Secure redaction that removes content, not just covers it.
@@ -22,9 +28,10 @@ A local-first, privacy-first PDF editor for the web and Android, licensed under 
 
 **Pages**
 - Real thumbnails; drag to reorder; rotate, crop, delete, duplicate and insert blank pages.
+- Change the paper size (A3–A5, Letter, Legal or custom), scaling content and edits to fit.
 - Insert or append other PDFs, or photos as pages. Every page operation is undoable.
 - Headers, footers, page numbers, watermarks and Bates numbering that update as pages change.
-- Extract pages, or save a page as an image.
+- Extract pages, split into several PDFs by ranges or every N pages (saved as a ZIP), or save a page as an image.
 
 **Tools**
 - Open password-protected PDFs; encrypt exports with passwords and permissions.
@@ -33,8 +40,8 @@ A local-first, privacy-first PDF editor for the web and Android, licensed under 
 
 **Workflow**
 - Autosave to device storage with recent projects and crash recovery.
-- Full undo/redo, keyboard shortcuts (press `?`), pinch and Ctrl+scroll zoom, fit width/page, dark mode.
-- A responsive layout for phones and desktops, and installable as an app.
+- Full undo/redo, keyboard shortcuts (press `?`), pinch, double-tap and Ctrl+scroll zoom, fit width/page, dark mode.
+- A phone layout with a bottom toolbar, tool trays and options in reach of your thumb; a desktop layout with tabbed tool groups. Installable as an app.
 
 Every export is re-opened and rendered before it is handed to you; a document that fails validation is never saved.
 
@@ -55,6 +62,7 @@ The unit tests in `packages/pdf-engine` build real PDFs with MuPDF and inspect w
 
 - `apps/web`: React/Vite editor
   - `App.tsx`: document state, tools and dialogs
+  - `DocumentView.tsx`: continuous, virtualized page column
   - `PageCanvas.tsx`: page interaction
   - `textMetrics.ts`: font-accurate text preview
   - `layout.ts`: generated headers and footers
