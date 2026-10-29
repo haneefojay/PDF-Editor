@@ -27,6 +27,7 @@
     "typescript": "^5.9.2"
   },
   "dependencies": {
+    "@capacitor-community/text-to-speech": "6.1.0",
     "@capacitor/app": "^7.1.2",
     "@capacitor/core": "^7.6.9",
     "@capacitor/filesystem": "^7.1.9",

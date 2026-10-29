@@ -397,3 +397,80 @@ test("explains which files cannot be opened", async ({ page }) => {
   await page.setInputFiles('input[aria-label="Open PDF"]', { name: "deck.pptx", mimeType: "application/octet-stream", buffer: Buffer.from("x") });
   await expect(page.getByRole("alert")).toContainText("PowerPoint files can't be opened yet");
 });
+
+/** A stand-in speech engine: each utterance "ends" after a short pause. */
+const fakeSpeech = () => {
+  const spoken: string[] = [];
+  let current: { onend?: () => void; onerror?: (event: { error: string }) => void } | null = null;
+  class Utterance {
+    text: string;
+    rate = 1;
+    voice: unknown = null;
+    lang = "";
+    onend?: () => void;
+    onerror?: (event: { error: string }) => void;
+    constructor(text: string) {
+      this.text = text;
+    }
+  }
+  // The real properties are read-only accessors, so they are redefined.
+  Object.defineProperty(window, "SpeechSynthesisUtterance", { value: Utterance, configurable: true });
+  Object.defineProperty(window, "__spoken", { value: spoken, configurable: true });
+  Object.defineProperty(window, "speechSynthesis", {
+    configurable: true,
+    value: {
+      getVoices: () => [{ voiceURI: "test-voice", name: "Test voice", lang: "en-US" }, { voiceURI: "other", name: "Other voice", lang: "en-GB" }],
+      addEventListener: () => undefined,
+      resume: () => undefined,
+      speak: (utterance: Utterance) => {
+        current = utterance;
+        spoken.push(utterance.text);
+        setTimeout(() => current === utterance && utterance.onend?.(), 300);
+      },
+      cancel: () => {
+        const stopped = current;
+        current = null;
+        stopped?.onerror?.({ error: "interrupted" });
+      },
+    },
+  });
+};
+
+test("reads aloud sentence by sentence, following the text onto the next page", async ({ page }) => {
+  await page.addInitScript(fakeSpeech);
+  await openSample(page, longPdf(), "long.pdf");
+  await tab(page, "Tools");
+  await tool(page, "Read aloud");
+  const bar = page.getByRole("region", { name: "Read aloud" });
+  await expect(page.locator(".readingHighlight").first()).toBeVisible();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __spoken: string[] }).__spoken[0])).toContain("Chapter 1");
+  // It moves on to page 2 by itself and scrolls it into view.
+  await expect(bar).toContainText("Page 2 of 12", { timeout: 20_000 });
+  await expect(pageAt(page, 1)).toBeInViewport();
+  await bar.getByRole("button", { name: "Pause reading" }).click();
+  const count = await page.evaluate(() => (window as unknown as { __spoken: string[] }).__spoken.length);
+  await page.waitForTimeout(300);
+  expect(await page.evaluate(() => (window as unknown as { __spoken: string[] }).__spoken.length)).toBe(count);
+  await expect(bar.getByRole("combobox", { name: "Voice" })).toContainText("Other voice");
+  await bar.getByRole("button", { name: "Next sentence" }).click();
+  await expect(page.locator(".readingHighlight").first()).toBeVisible();
+  await bar.getByRole("button", { name: "Start reading" }).click();
+  await expect(bar.getByRole("button", { name: "Pause reading" })).toBeVisible();
+  await bar.getByRole("button", { name: "Close read aloud" }).click();
+  await expect(page.locator(".readingHighlight")).toHaveCount(0);
+});
+
+test("auto-scrolls and pauses", async ({ page }) => {
+  await openSample(page, longPdf(), "long.pdf");
+  await tab(page, "Tools");
+  await tool(page, "Auto-scroll");
+  const stage = page.locator(".stage");
+  await expect.poll(() => stage.evaluate((element) => element.scrollTop), { timeout: 10_000 }).toBeGreaterThan(40);
+  const bar = page.getByRole("region", { name: "Auto-scroll" });
+  await bar.getByRole("button", { name: "Pause scrolling" }).click();
+  const stopped = await stage.evaluate((element) => element.scrollTop);
+  await page.waitForTimeout(400);
+  expect(await stage.evaluate((element) => element.scrollTop)).toBe(stopped);
+  await bar.getByRole("button", { name: "Close auto-scroll" }).click();
+  await expect(bar).toHaveCount(0);
+});

@@ -11,6 +11,8 @@ export type DocumentViewHandle = {
   scrollToPage: (index: number, top?: number, behavior?: ScrollBehavior) => void;
   /** Records a page as current without scrolling (the user is already on it). */
   markCurrent: (index: number) => void;
+  /** Scrolls just enough to show a band of a page (normalized top and bottom), if it is not in view. */
+  reveal: (index: number, top: number, bottom: number) => void;
 };
 
 type Rendered = { url: string; scale: number };
@@ -81,8 +83,19 @@ export const DocumentView = forwardRef<
       markCurrent: (index: number) => {
         reported.current = index;
       },
+      reveal: (index: number, top: number, bottom: number) => {
+        const slot = slots.current.get(index);
+        if (!stage || !slot) return;
+        const start = slot.offsetTop + slot.offsetHeight * top;
+        const end = slot.offsetTop + slot.offsetHeight * bottom;
+        const view = stage.scrollTop;
+        const height = stage.clientHeight;
+        if (start >= view + height * 0.08 && end <= view + height * 0.8) return;
+        reported.current = index;
+        stage.scrollTo({ top: Math.max(0, start - height * 0.25), behavior: "smooth" });
+      },
     }),
-    [scrollToPage],
+    [scrollToPage, stage],
   );
 
   // Navigation from elsewhere (thumbnails, search, keyboard) scrolls to the page.

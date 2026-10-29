@@ -2638,3 +2638,73 @@ span.scanIcon {
   background: #000c;
   color: #fff;
 }
+
+/* Read aloud and auto-scroll */
+.readingHighlight {
+  fill: #3a8dff40;
+  stroke: #2f7ae5;
+  stroke-width: 0.0015;
+  rx: 0.002;
+  pointer-events: none;
+}
+.readingBar {
+  position: fixed;
+  left: 50%;
+  bottom: 64px;
+  transform: translateX(-50%);
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(100vw - 24px);
+  padding: 6px 8px 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 99px;
+  background: var(--raised);
+  box-shadow: 0 8px 28px #0003;
+}
+.readingBar select {
+  min-height: 34px;
+  max-width: 180px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+}
+.readingBar .primaryRound {
+  background: var(--accent);
+  color: #fff;
+  border-radius: 50%;
+}
+.readingBar .primaryRound:hover {
+  background: var(--accent-strong);
+}
+.readingStatus {
+  min-width: 90px;
+  font-size: 13px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.readingSpeed {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.readingIcon {
+  width: 18px;
+  color: var(--muted);
+}
+.app.phone .readingBar {
+  bottom: calc(76px + env(safe-area-inset-bottom));
+  border-radius: 16px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.app.phone .readingBar .voiceSelect {
+  display: none;
+}

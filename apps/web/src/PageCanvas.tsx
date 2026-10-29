@@ -119,6 +119,8 @@ export function PageCanvas(props: {
   selectedId: string | null;
   editingId: string | null;
   highlight: Rect | null;
+  /** The sentence being read aloud. */
+  reading?: Rect[] | null;
   page: number;
   onSelect: (id: string | null) => void;
   onEditText: (id: string | null) => void;
@@ -798,6 +800,7 @@ export function PageCanvas(props: {
           )}
           {props.crop && <rect className="cropRect" {...props.crop} vectorEffect="non-scaling-stroke" />}
           {props.highlight && <rect className="searchHighlight" {...props.highlight} />}
+          {props.reading?.map((box, index) => <rect key={index} className="readingHighlight" x={box.x} y={box.y} width={box.width} height={box.height} />)}
           {tool === "eraser" && eraserAt && (
             <ellipse className="eraserCursor" cx={eraserAt.x} cy={eraserAt.y} rx={10 / zoom / info.width} ry={10 / zoom / info.height} vectorEffect="non-scaling-stroke" />
           )}
