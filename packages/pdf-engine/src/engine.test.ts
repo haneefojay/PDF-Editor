@@ -793,3 +793,24 @@ describe("annotation list", () => {
     expect(found[0]!.y).toBeCloseTo(46 / 400, 1);
   });
 });
+
+describe("document search", () => {
+  it("finds lines on every page in one call, and again after caching", async () => {
+    const engine = await engineWith(
+      makePdf([
+        { content: "BT /F1 12 Tf 60 700 Td (Annual Report) Tj ET BT /F1 12 Tf 60 680 Td (Nothing here) Tj ET" },
+        { content: "BT /F1 12 Tf 60 700 Td (Summary of the report) Tj ET" },
+        { content: "BT /F1 12 Tf 60 700 Td (Appendix) Tj ET" },
+      ]),
+    );
+    const found = await engine.findText("report", false);
+    expect(found.map((item) => [item.page, item.lines.map((line) => line.text.trim())])).toEqual([
+      [0, ["Annual Report"]],
+      [1, ["Summary of the report"]],
+    ]);
+    expect((await engine.findText("Report", true)).map((item) => item.page)).toEqual([0]);
+    // The cached text still finds new terms on pages that matched nothing before.
+    expect((await engine.findText("appendix", false)).map((item) => item.page)).toEqual([2]);
+    expect(await engine.findText("", false)).toEqual([]);
+  });
+});

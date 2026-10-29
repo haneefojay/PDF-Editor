@@ -82,6 +82,23 @@ export function longPdf() {
   return bytes;
 }
 
+/** A plain document with many pages, for checking that long files stay light. */
+export function manyPagesPdf(pages: number) {
+  const doc = new mupdf.PDFDocument();
+  const resources = doc.newDictionary();
+  const fonts = doc.newDictionary();
+  resources.put("Font", fonts);
+  fonts.put("F1", doc.addSimpleFont(new mupdf.Font("Helvetica")));
+  for (let index = 0; index < pages; index += 1) {
+    const lines = [`BT /F1 24 Tf 60 730 Td (Page ${index + 1}) Tj ET`];
+    for (let line = 0; line < 20; line += 1) lines.push(`BT /F1 10 Tf 60 ${690 - line * 22} Td (Line ${line + 1} of page ${index + 1}) Tj ET`);
+    doc.insertPage(-1, doc.addPage([0, 0, 612, 792], 0, resources, lines.join("\n")));
+  }
+  const bytes = Buffer.from(doc.saveToBuffer("garbage=3,compress=yes").asUint8Array());
+  doc.destroy();
+  return bytes;
+}
+
 export const PARAGRAPH_LINES = [
   "Paperless keeps every document on your own device. Nothing is",
   "uploaded, so private contracts, medical letters and bank papers",

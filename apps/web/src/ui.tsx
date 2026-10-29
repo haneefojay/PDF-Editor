@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { X } from "lucide-react";
 
 /** Number input that accepts temporary invalid drafts and commits on blur/Enter. */
@@ -75,10 +75,40 @@ export function Modal({
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null;
     const node = ref.current;
+    // Everything behind the dialog is out of reach, for the mouse, keyboard and
+    // screen readers alike. Messages stay readable.
+    const hidden: Element[] = [];
+    for (let child: Element | null = node?.parentElement ?? null; child && child !== document.body; child = child.parentElement) {
+      for (const sibling of child.parentElement?.children ?? []) {
+        if (sibling === child || sibling.hasAttribute("inert") || sibling.matches(".toasts, script, style")) continue;
+        sibling.setAttribute("inert", "");
+        hidden.push(sibling);
+      }
+    }
     if (node && !node.contains(document.activeElement))
       (node.querySelector<HTMLElement>("[autofocus], input, select, textarea, button.primary") ?? node).focus();
-    return () => previous?.focus?.();
+    return () => {
+      hidden.forEach((element) => element.removeAttribute("inert"));
+      previous?.focus?.();
+    };
   }, []);
+  // Tab and Shift+Tab cycle through the dialog's own controls.
+  const trapFocus = (event: KeyboardEvent<HTMLElement>) => {
+    if (event.key !== "Tab" || !ref.current) return;
+    const focusable = [...ref.current.querySelectorAll<HTMLElement>("a[href], button, input, select, textarea, summary, [tabindex]")].filter(
+      (element) => !element.matches(":disabled, [tabindex='-1']") && element.offsetParent !== null,
+    );
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (!first || !last) return;
+    if (event.shiftKey && (document.activeElement === first || document.activeElement === ref.current)) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
   return (
     <div
       className="modalBackdrop"
@@ -95,13 +125,14 @@ export function Modal({
         aria-modal="true"
         aria-label={title}
         onKeyDown={(event) => {
+          trapFocus(event);
           if (event.key === "Escape" && !closeDisabled) {
             event.stopPropagation();
             onClose();
           }
         }}
       >
-        <header>
+        <div className="modalHeader">
           <div>
             <h2>{title}</h2>
             {description && <p>{description}</p>}
@@ -109,7 +140,7 @@ export function Modal({
           <button aria-label={`Close ${title.toLowerCase()}`} disabled={closeDisabled} onClick={onClose}>
             <X />
           </button>
-        </header>
+        </div>
         <div className="modalBody">{children}</div>
         {footer && <footer>{footer}</footer>}
       </section>

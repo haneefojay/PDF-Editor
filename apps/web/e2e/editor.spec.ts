@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { readFile } from "node:fs/promises";
-import { colourAt, imageOnPanelPdf, inspectPdf, longPdf, PARAGRAPH_LINES, paragraphPdf, pngImage, readStoredZip, samplePdf, wordFile, excelFile, zipText, outlineOf, annotatedPdf } from "./fixtures";
+import { colourAt, imageOnPanelPdf, inspectPdf, longPdf, PARAGRAPH_LINES, paragraphPdf, pngImage, readStoredZip, samplePdf, wordFile, excelFile, zipText, outlineOf, annotatedPdf, manyPagesPdf } from "./fixtures";
 import { clickOnPage, dragOnPage, exportPdf, fitPage, openSample, pageAt, tab, tool } from "./helpers";
 
 test("edits original text without disturbing the table around it", async ({ page }) => {
@@ -129,7 +129,7 @@ test("creates a PDF from images and adds image pages", async ({ page }) => {
     { name: "scan-2.png", mimeType: "image/png", buffer: pngImage(200, 400) },
   ]);
   await expect(page.locator(".rail .thumb")).toHaveCount(2, { timeout: 60_000 });
-  await expect(page.locator(".file b")).toHaveText("scan-1.pdf");
+  await expect(page.locator(".file h1")).toHaveText("scan-1.pdf");
   await tab(page, "Pages");
   const chooser = page.waitForEvent("filechooser");
   await tool(page, "Images as pages");
@@ -169,11 +169,49 @@ test("keeps an unfinished text edit when changing page", async ({ page }) => {
   expect(pdf.pages[0]!.text).toContain("Southwest");
 });
 
+test("a 600-page document stays light: only nearby pages and thumbnails exist", async ({ page }) => {
+  const started = Date.now();
+  await openSample(page, manyPagesPdf(600), "long.pdf");
+  expect(Date.now() - started).toBeLessThan(30_000);
+  await expect(page.locator(".pageInput")).toHaveValue("1");
+  expect(await page.locator(".pageSlot").count()).toBeLessThan(8);
+  expect(await page.locator(".rail .thumb").count()).toBeLessThan(20);
+  expect(await page.locator("*").count()).toBeLessThan(2500);
+
+  // Jumping far ahead renders that page, and the thumbnail rail follows.
+  await page.locator(".pageInput").fill("480");
+  await page.locator(".pageInput").press("Enter");
+  await expect(page.locator('.pageSlot[data-index="479"] .page > img')).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator(".rail .thumb.active .thumbButton")).toHaveAccessibleName("Page 480");
+  await expect(page.locator(".rail .thumb.active")).toBeInViewport();
+  await expect(page.locator(".rail .thumb.active .thumbPreview img")).toBeVisible({ timeout: 20_000 });
+  expect(await page.locator(".pageSlot").count()).toBeLessThan(8);
+
+  // Scrolling the document moves the current page.
+  await page.locator(".stage").evaluate((stage) => stage.scrollBy(0, 5000));
+  await expect(page.locator(".pageInput")).not.toHaveValue("480");
+
+  // The organizer only builds the visible part of its grid, and scrolls to the end.
+  await tab(page, "Pages");
+  await tool(page, "Organize");
+  const dialog = page.getByRole("dialog", { name: "Organize pages" });
+  expect(await dialog.locator(".organizerGrid label").count()).toBeLessThan(80);
+  await dialog.locator(".organizerGrid").evaluate((grid) => {
+    let node: HTMLElement | null = grid.parentElement;
+    while (node && !["auto", "scroll"].includes(getComputedStyle(node).overflowY)) node = node.parentElement;
+    node!.scrollTop = node!.scrollHeight;
+  });
+  await expect(dialog.locator(".organizerGrid label", { hasText: /^600$/ })).toBeVisible();
+  expect(await dialog.locator(".organizerGrid label").count()).toBeLessThan(80);
+});
+
 test("continuous scrolling tracks the page and follows outline and links", async ({ page }) => {
   await openSample(page, longPdf(), "long.pdf");
-  await expect(page.locator(".pageSlot")).toHaveCount(12);
-  // Only pages near the viewport are rendered.
+  // Only pages near the viewport are in the page, but the column is as tall as all 12.
+  expect(await page.locator(".pageSlot").count()).toBeLessThan(6);
   expect(await page.locator(".page > img").count()).toBeLessThan(6);
+  const firstHeight = (await page.locator(".pageSlot").first().boundingBox())!.height;
+  expect(await page.locator(".pageColumn").evaluate((column) => column.scrollHeight)).toBeGreaterThan(firstHeight * 12);
 
   await page.locator(".stage").evaluate((stage) => stage.scrollBy(0, stage.scrollHeight / 2));
   await expect(page.locator(".pageInput")).not.toHaveValue("1");
