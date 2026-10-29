@@ -16,6 +16,7 @@ import type {
   PageLayout,
   ExportOverlay,
   ExportRequest,
+  FileAnnotation,
   FormField,
   OutlineEntry,
   PageImage,
@@ -1922,6 +1923,73 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
       structured.destroy();
       page.destroy();
       return images;
+    },
+
+    async listAnnotations() {
+      const target = requireDoc();
+      const found: FileAnnotation[] = [];
+      const skip = new Set(["Widget", "Link", "Popup", "PrinterMark", "TrapNet", "Watermark", "Screen", "3D", "Redact"]);
+      const markup = new Set(["Highlight", "Underline", "StrikeOut", "Squiggly"]);
+      for (let index = 0; index < target.countPages(); index += 1) {
+        const page = target.loadPage(index);
+        const annotations = page.getAnnotations().filter((annotation) => !skip.has(annotation.getType()));
+        if (!annotations.length) {
+          page.destroy();
+          continue;
+        }
+        const bounds = page.getBounds();
+        const width = bounds[2] - bounds[0];
+        const height = bounds[3] - bounds[1];
+        // Text under markup comes from the characters inside its rectangle.
+        const chars: { char: string; x: number; y: number; line: number }[] = [];
+        if (annotations.some((annotation) => markup.has(annotation.getType()))) {
+          const structured = page.toStructuredText("");
+          let line = 0;
+          structured.walk({
+            beginLine: () => (line += 1),
+            onChar: (char, _origin, _font, _size, quad) => chars.push({ char, x: (quad[0] + quad[6]) / 2, y: (quad[1] + quad[7]) / 2, line }),
+          });
+          structured.destroy();
+        }
+        annotations.forEach((annotation, position) => {
+          const [x0, y0, x1, y1] = annotation.getBounds();
+          const type = annotation.getType();
+          let text = "";
+          if (markup.has(type)) {
+            let lastLine = -1;
+            for (const item of chars)
+              if (item.x >= x0 - 1 && item.x <= x1 + 1 && item.y >= y0 - 2 && item.y <= y1 + 2) {
+                text += (lastLine >= 0 && item.line !== lastLine && !text.endsWith(" ") ? " " : "") + item.char;
+                lastLine = item.line;
+              }
+          }
+          const color = annotation.getColor();
+          let modified: string | null = null;
+          try {
+            const date = annotation.getModificationDate();
+            // Annotations without a date report the epoch.
+            modified = date && !Number.isNaN(date.getTime()) && date.getUTCFullYear() >= 1990 ? date.toISOString() : null;
+          } catch {
+            modified = null;
+          }
+          found.push({
+            id: `${index}-${position}`,
+            page: index,
+            type,
+            text: text.replace(/\s+/g, " ").trim(),
+            comment: annotation.getContents() ?? "",
+            author: annotation.getAuthor() ?? "",
+            modified,
+            color: color && color.length ? extractedColor(color as Mupdf.Color) : null,
+            x: (x0 - bounds[0]) / width,
+            y: (y0 - bounds[1]) / height,
+            width: (x1 - x0) / width,
+            height: (y1 - y0) / height,
+          });
+        });
+        page.destroy();
+      }
+      return found;
     },
 
     async getOutline() {

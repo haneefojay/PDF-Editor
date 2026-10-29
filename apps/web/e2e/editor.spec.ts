@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { readFile } from "node:fs/promises";
-import { colourAt, imageOnPanelPdf, inspectPdf, longPdf, PARAGRAPH_LINES, paragraphPdf, pngImage, readStoredZip, samplePdf, wordFile, excelFile, zipText, outlineOf } from "./fixtures";
+import { colourAt, imageOnPanelPdf, inspectPdf, longPdf, PARAGRAPH_LINES, paragraphPdf, pngImage, readStoredZip, samplePdf, wordFile, excelFile, zipText, outlineOf, annotatedPdf } from "./fixtures";
 import { clickOnPage, dragOnPage, exportPdf, fitPage, openSample, pageAt, tab, tool } from "./helpers";
 
 test("edits original text without disturbing the table around it", async ({ page }) => {
@@ -510,4 +510,24 @@ test("adds, renames, nests and reorders bookmarks, and exports them", async ({ p
   expect(outlineOf(await exportPdf(page)).map((row) => row[0])).toEqual(["Appendix", "Summary"]);
   await page.getByRole("button", { name: "Undo" }).click();
   expect(outlineOf(await exportPdf(page)).map((row) => row[0])).toEqual(["Summary", "Appendix"]);
+});
+
+test("lists the annotations already in the file and jumps to them", async ({ page }) => {
+  await openSample(page, annotatedPdf(), "annotated.pdf");
+  await tab(page, "Comment");
+  await tool(page, "All comments");
+  const panel = page.getByRole("complementary", { name: "Comments" });
+  await expect(panel).toContainText("2 in the file");
+  await expect(panel.getByRole("heading", { name: "Already in the file (2)" })).toBeVisible();
+  // Listed top to bottom: the note sits above the highlight.
+  await expect(panel.locator(".fileAnnotation").first()).toContainText("Signed copy is in the drawer.");
+  await expect(panel.locator(".fileAnnotation").first()).not.toContainText("1969");
+  const highlight = panel.locator(".fileAnnotation").nth(1);
+  await expect(highlight).toContainText("Page 3 · Highlight");
+  await expect(highlight).toContainText("The contract renews every year in March.");
+  await expect(highlight).toContainText("Is this still right?");
+  await expect(highlight).toContainText("Lee");
+  await highlight.getByRole("button").click();
+  await expect(pageAt(page, 2)).toBeInViewport();
+  await expect(pageAt(page, 2).locator(".searchHighlight")).toHaveCount(1);
 });

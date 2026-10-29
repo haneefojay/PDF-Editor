@@ -762,3 +762,34 @@ describe("bookmarks", () => {
     expect(outline.map((entry) => entry.title)).toEqual(["Original"]);
   });
 });
+
+describe("annotation list", () => {
+  it("lists notes and markup with the text they mark", async () => {
+    const doc = new mupdf.PDFDocument();
+    const resources = doc.newDictionary();
+    const fonts = doc.newDictionary();
+    fonts.put("F1", doc.addSimpleFont(new mupdf.Font("Helvetica")));
+    resources.put("Font", fonts);
+    doc.insertPage(-1, doc.addPage([0, 0, 400, 400], 0, resources, "BT /F1 14 Tf 40 340 Td (Important sentence here) Tj ET BT /F1 14 Tf 40 300 Td (Other line) Tj ET"));
+    const page = doc.loadPage(0);
+    const highlight = page.createAnnotation("Highlight");
+    highlight.setQuadPoints([[40, 46, 210, 46, 40, 64, 210, 64]]);
+    highlight.setAuthor("Ada");
+    highlight.setContents("Check this");
+    highlight.setColor([1, 1, 0]);
+    highlight.update();
+    const note = page.createAnnotation("Text");
+    note.setRect([300, 300, 320, 320]);
+    note.setContents("A sticky note");
+    note.update();
+    const link = page.createLink([40, 100, 100, 110], "https://example.com");
+    void link;
+    const engine = await engineWith(new Uint8Array(doc.saveToBuffer("").asUint8Array()).buffer);
+    const found = await engine.listAnnotations();
+    expect(found.map((item) => [item.type, item.text, item.comment, item.author, item.color])).toEqual([
+      ["Highlight", "Important sentence here", "Check this", "Ada", "#ffff00"],
+      ["Text", "", "A sticky note", "", expect.any(String)],
+    ]);
+    expect(found[0]!.y).toBeCloseTo(46 / 400, 1);
+  });
+});

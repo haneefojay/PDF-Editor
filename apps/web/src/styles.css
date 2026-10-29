@@ -2758,3 +2758,23 @@ span.scanIcon {
 .outlineEdit .iconButton svg {
   width: 15px;
 }
+
+.reviewGroup {
+  margin: 14px 2px 6px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.fileAnnotation .reviewJump {
+  width: 100%;
+}
+.swatch {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin-right: 6px;
+  border-radius: 2px;
+  vertical-align: 0;
+}
