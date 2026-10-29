@@ -725,3 +725,40 @@ describe("HTML layout", () => {
     doc.destroy();
   });
 });
+
+describe("bookmarks", () => {
+  it("replaces the outline with nested entries in export order", async () => {
+    const engine = await engineWith(makePdf([{}, {}, {}]));
+    const exported = await engine.exportDocument(
+      request({
+        pageOrder: [2, 0, 1],
+        bookmarks: [
+          { title: "Chapter A", page: 0, depth: 0 },
+          { title: "Section A.1", page: 1, top: 0.5, depth: 1 },
+          { title: "Deep jump", page: 2, depth: 3 },
+          { title: "Website", page: null, depth: 0, uri: "https://example.com/" },
+          { title: "   ", page: 0, depth: 0 },
+          { title: "Missing page", page: 9, depth: 0 },
+        ],
+      }),
+    );
+    const engineAfter = await engineWith(new Uint8Array(exported.bytes).buffer);
+    const outline = await engineAfter.getOutline();
+    expect(outline.map((entry) => [entry.title, entry.page, entry.depth, entry.uri ?? null])).toEqual([
+      ["Chapter A", 0, 0, null],
+      ["Section A.1", 1, 1, null],
+      ["Deep jump", 2, 2, null],
+      ["Website", null, 0, "https://example.com/"],
+    ]);
+  });
+
+  it("keeps the file's outline when bookmarks are not edited", async () => {
+    const doc = new mupdf.PDFDocument();
+    for (let index = 0; index < 2; index += 1) doc.insertPage(-1, doc.addPage([0, 0, 300, 300], 0, doc.newDictionary(), ""));
+    doc.outlineIterator().insert({ title: "Original", uri: "#page=2", open: true });
+    const engine = await engineWith(new Uint8Array(doc.saveToBuffer("").asUint8Array()).buffer);
+    const exported = await engine.exportDocument(request({ pageOrder: [0, 1] }));
+    const outline = await (await engineWith(new Uint8Array(exported.bytes).buffer)).getOutline();
+    expect(outline.map((entry) => entry.title)).toEqual(["Original"]);
+  });
+});

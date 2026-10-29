@@ -125,6 +125,11 @@ export type ExportRequest = {
   compression?: "original" | "balanced" | "small";
   sanitizeMetadata?: boolean;
   flattenForms?: boolean;
+  /**
+   * Replaces the outline when given. Pages are positions in the exported
+   * document; `top` is a normalized offset from the top of the page.
+   */
+  bookmarks?: { title: string; page: number | null; top?: number; depth: number; uri?: string }[];
   encryption?: {
     userPassword: string;
     ownerPassword: string;

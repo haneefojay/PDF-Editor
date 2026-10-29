@@ -269,6 +269,17 @@ export const PageLayout = z.object({
 });
 export type PageLayout = z.infer<typeof PageLayout>;
 
+/** A bookmark (outline entry). `page` is a source page index; `top` a normalized offset on it. */
+export const Bookmark = z.object({
+  id: z.string(),
+  title: z.string(),
+  page: z.number().int().nonnegative().nullable(),
+  top: z.number().min(0).max(1).optional(),
+  depth: z.number().int().min(0).max(8),
+  uri: z.string().optional(),
+});
+export type Bookmark = z.infer<typeof Bookmark>;
+
 export const EditorDocumentSchema = z.object({
   schemaVersion: z.literal(1),
   overlays: z.array(Overlay),
@@ -283,6 +294,8 @@ export const EditorDocumentSchema = z.object({
   }),
   formValues: z.record(z.string(), z.string()).default({}),
   layout: PageLayout.nullable().default(null),
+  /** Edited bookmarks; null keeps the file's own outline as it is. */
+  bookmarks: z.array(Bookmark).nullable().default(null),
 });
 export type EditorDocument = z.infer<typeof EditorDocumentSchema>;
 
@@ -304,6 +317,7 @@ export type Command =
   | { type: "setMetadata"; before: Metadata; after: Metadata }
   | { type: "setFormValue"; name: string; before: string; after: string }
   | { type: "setLayout"; before: PageLayout | null; after: PageLayout | null }
+  | { type: "setBookmarks"; before: Bookmark[] | null; after: Bookmark[] | null }
   | { type: "batch"; commands: Command[] };
 
 export type RedactMode = "redact" | "eraseText" | "eraseImage";
@@ -324,6 +338,7 @@ export const emptyDocument = (pageCount = 0): EditorDocument => ({
   metadata: { title: "", author: "", subject: "", keywords: "" },
   formValues: {},
   layout: null,
+  bookmarks: null,
 });
 
 export function applyCommand(
@@ -361,6 +376,7 @@ export function applyCommand(
     if (command.type === "setFormValue")
       draft.formValues[command.name] = command.after;
     if (command.type === "setLayout") draft.layout = command.after;
+    if (command.type === "setBookmarks") draft.bookmarks = command.after;
   });
 }
 
@@ -393,6 +409,8 @@ export function inverseCommand(command: Command): Command {
   if (command.type === "setFormValue")
     return { ...command, before: command.after, after: command.before };
   if (command.type === "setLayout")
+    return { ...command, before: command.after, after: command.before };
+  if (command.type === "setBookmarks")
     return { ...command, before: command.after, after: command.before };
   throw new Error("Unsupported command");
 }

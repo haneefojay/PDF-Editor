@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { readFile } from "node:fs/promises";
-import { colourAt, imageOnPanelPdf, inspectPdf, longPdf, PARAGRAPH_LINES, paragraphPdf, pngImage, readStoredZip, samplePdf, wordFile, excelFile, zipText } from "./fixtures";
+import { colourAt, imageOnPanelPdf, inspectPdf, longPdf, PARAGRAPH_LINES, paragraphPdf, pngImage, readStoredZip, samplePdf, wordFile, excelFile, zipText, outlineOf } from "./fixtures";
 import { clickOnPage, dragOnPage, exportPdf, fitPage, openSample, pageAt, tab, tool } from "./helpers";
 
 test("edits original text without disturbing the table around it", async ({ page }) => {
@@ -473,4 +473,41 @@ test("auto-scrolls and pauses", async ({ page }) => {
   expect(await stage.evaluate((element) => element.scrollTop)).toBe(stopped);
   await bar.getByRole("button", { name: "Close auto-scroll" }).click();
   await expect(bar).toHaveCount(0);
+});
+
+test("adds, renames, nests and reorders bookmarks, and exports them", async ({ page }) => {
+  await openSample(page);
+  await tab(page, "Pages");
+  await tool(page, "Bookmark page");
+  const outline = page.getByRole("navigation", { name: "Document outline" });
+  const first = outline.getByRole("textbox", { name: "Bookmark 1 title" });
+  await expect(first).toBeFocused();
+  await page.keyboard.type("Summary");
+  await page.keyboard.press("Enter");
+
+  await page.locator(".rail").getByRole("tab", { name: "Thumbnails" }).click();
+  await page.locator(".rail .thumb").nth(2).click();
+  await tab(page, "Pages");
+  await tool(page, "Bookmark page");
+  await expect(outline.getByRole("textbox", { name: "Bookmark 2 title" })).toBeFocused();
+  await page.keyboard.type("Appendix");
+  await page.keyboard.press("Enter");
+  await outline.getByRole("button", { name: "Indent Appendix" }).click();
+  await outline.getByRole("button", { name: "Done" }).click();
+  await expect(outline.locator(".outlineEntry")).toHaveText(["Summary1", "Appendix3"]);
+
+  await outline.getByRole("button", { name: /Summary/ }).click();
+  await expect(pageAt(page, 0)).toBeInViewport();
+
+  expect(outlineOf(await exportPdf(page))).toEqual([
+    ["Summary", 0, 0],
+    ["Appendix", 2, 1],
+  ]);
+
+  // Undo takes back the last change (the indent), keeping the rest.
+  await outline.getByRole("button", { name: "Edit" }).click();
+  await outline.getByRole("button", { name: "Move Appendix up" }).click();
+  expect(outlineOf(await exportPdf(page)).map((row) => row[0])).toEqual(["Appendix", "Summary"]);
+  await page.getByRole("button", { name: "Undo" }).click();
+  expect(outlineOf(await exportPdf(page)).map((row) => row[0])).toEqual(["Summary", "Appendix"]);
 });

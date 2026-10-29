@@ -260,3 +260,18 @@ export async function excelFile() {
   ]);
   return Buffer.from(bytes);
 }
+
+/** The outline of a PDF as [title, page, depth] rows. */
+export function outlineOf(bytes: Buffer) {
+  const doc = mupdf.Document.openDocument(bytes, "application/pdf");
+  const rows: [string, number | null, number][] = [];
+  const walk = (items: ReturnType<mupdf.Document["loadOutline"]> | undefined, depth: number) => {
+    for (const item of items ?? []) {
+      rows.push([item.title ?? "", item.page ?? null, depth]);
+      walk(item.down, depth + 1);
+    }
+  };
+  walk(doc.loadOutline(), 0);
+  doc.destroy();
+  return rows;
+}

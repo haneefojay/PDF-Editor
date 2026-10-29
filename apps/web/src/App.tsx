@@ -52,6 +52,9 @@ import {
   Maximize,
   Moon,
   Volume2,
+  BookmarkPlus,
+  IndentDecrease,
+  IndentIncrease,
   ChevronsDown,
   Merge,
   MessageSquareText,
@@ -84,6 +87,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
+import type { Bookmark } from "@paperless/editor-core";
 import {
   createPdfEngine,
   PASSWORD_INCORRECT,
@@ -239,6 +243,8 @@ export function App() {
   const [pendingOcr, setPendingOcr] = useState<null | { sources: number[]; language: OcrLanguage }>(null);
   const scanBack = useRef<(() => boolean) | null>(null);
   const [readingMode, setReadingMode] = useState<null | "speak" | "scroll">(null);
+  const [editingBookmarks, setEditingBookmarks] = useState(false);
+  const [focusBookmark, setFocusBookmark] = useState<string | null>(null);
   const [readingSentence, setReadingSentence] = useState<{ source: number; boxes: Box[] } | null>(null);
   const sourceLines = useRef(new Map<number, Promise<PositionedTextLine[]>>());
   const [splitMode, setSplitMode] = useState<"every" | "ranges">("every");
@@ -813,6 +819,7 @@ export function App() {
     !!open &&
     (doc.overlays.length > 0 ||
       doc.layout !== null ||
+      doc.bookmarks !== null ||
       Object.values(doc.rotations).some((value) => value % 360 !== 0) ||
       Object.keys(doc.crops).length > 0 ||
       JSON.stringify(doc.metadata) !== JSON.stringify(open.initialMetadata) ||
@@ -830,6 +837,14 @@ export function App() {
     overlays: [...doc.overlays, ...generated],
     rotations: doc.rotations,
     pageOrder: overrides.pageOrder ?? doc.pageOrder,
+    // Edited bookmarks point at pages by their place in the exported file.
+    bookmarks: doc.bookmarks?.map((bookmark) => ({
+      title: bookmark.title,
+      page: bookmark.page === null ? null : (overrides.pageOrder ?? doc.pageOrder).indexOf(bookmark.page),
+      top: bookmark.top,
+      depth: bookmark.depth,
+      uri: bookmark.uri,
+    })),
     crops: doc.crops,
     metadata: doc.metadata,
     formValues: doc.formValues,
@@ -1716,6 +1731,33 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingOcr, open, ocrRunning]);
 
+  // Bookmarks: the file's outline until edited, then the document's own list.
+  const fileBookmarks = useMemo<Bookmark[]>(
+    () => outline.map((entry, index) => ({ id: `file-${index}`, title: entry.title, page: entry.page, depth: entry.depth, ...(entry.uri ? { uri: entry.uri } : {}) })),
+    [outline],
+  );
+  const bookmarks = doc.bookmarks ?? fileBookmarks;
+  const setBookmarks = (after: Bookmark[]) => execute({ type: "setBookmarks", before: doc.bookmarks, after });
+  const addBookmark = () => {
+    const id = crypto.randomUUID();
+    const position = (entry: Bookmark) => (entry.page === null ? -1 : doc.pageOrder.indexOf(entry.page));
+    // Keep the list in page order: after the last bookmark on or before this page.
+    const at = bookmarks.reduce((last, entry, index) => (position(entry) <= page ? index + 1 : last), 0);
+    const depth = at > 0 ? bookmarks[at - 1]!.depth : 0;
+    setBookmarks([...bookmarks.slice(0, at), { id, title: `Page ${page + 1}`, page: sourcePage, depth }, ...bookmarks.slice(at)]);
+    setRailTab("outline");
+    setShowRail(true);
+    setEditingBookmarks(true);
+    setFocusBookmark(id);
+  };
+  const moveBookmark = (index: number, delta: number) => {
+    const next = [...bookmarks];
+    const [moved] = next.splice(index, 1);
+    next.splice(Math.max(0, Math.min(next.length, index + delta)), 0, moved!);
+    setBookmarks(next);
+  };
+  const updateBookmark = (index: number, change: Partial<Bookmark>) => setBookmarks(bookmarks.map((entry, item) => (item === index ? { ...entry, ...change } : entry)));
+
   /**
    * What read aloud says for a page: the file's text minus anything erased by
    * an edit, followed by text added on the page (including OCR text).
@@ -2227,6 +2269,7 @@ export function App() {
         { key: "imagePages", label: "Images as pages", Icon: Images, action: () => inputs.imagePages.current?.click(), title: "Insert photos or scans as new pages" },
         { key: "merge", label: "Append PDF", Icon: FileOutput, action: () => inputs.merge.current?.click(), title: "Add another PDF at the end" },
         { key: "pageImage", label: "Page to image", Icon: ImageDown, action: () => void savePageImage(), title: "Save this page as a PNG image" },
+        { key: "bookmark", label: "Bookmark page", Icon: BookmarkPlus, action: addBookmark, title: "Add this page to the bookmarks" },
         { key: "split", label: "Split", Icon: Scissors, action: () => setDialog("split"), title: "Split into several PDFs by page ranges", disabled: doc.pageOrder.length < 2 },
         { key: "pageSize", label: "Page size", Icon: Scaling, action: () => openPageSize("page"), title: "Change the paper size, scaling the content to fit" },
         { key: "extract", label: "Extract page", Icon: FileOutput, action: () => void exportPages([sourcePage], `${baseName(open.name)}-page-${page + 1}.pdf`, `Page ${page + 1} exported.`), title: "Save this page as its own PDF" },
@@ -2743,26 +2786,85 @@ export function App() {
             </div>
             {railTab === "outline" && (
               <nav className="outline" aria-label="Document outline">
-                {outline.length ? (
-                  outline.map((entry, index) => (
-                    <button
-                      key={index}
-                      className="outlineEntry"
-                      style={{ paddingLeft: 8 + entry.depth * 14 }}
-                      disabled={entry.page === null && !entry.uri}
-                      onClick={() => {
-                        if (entry.page !== null) goTo(entry.page);
-                        else if (entry.uri) followLink({ x: 0, y: 0, width: 0, height: 0, uri: entry.uri });
-                        if (isPhone) setShowRail(false);
-                      }}
-                    >
-                      <span>{entry.title}</span>
-                      {entry.page !== null && <small>{doc.pageOrder.indexOf(entry.page) + 1 || "–"}</small>}
+                <div className="outlineTools">
+                  <button onClick={addBookmark} title="Bookmark the current page">
+                    <BookmarkPlus /> Add bookmark
+                  </button>
+                  {bookmarks.length > 0 && (
+                    <button aria-pressed={editingBookmarks} onClick={() => setEditingBookmarks(!editingBookmarks)}>
+                      {editingBookmarks ? "Done" : "Edit"}
                     </button>
-                  ))
+                  )}
+                </div>
+                {bookmarks.length ? (
+                  bookmarks.map((entry, index) =>
+                    editingBookmarks ? (
+                      <div key={entry.id} className="outlineEdit" style={{ paddingLeft: 4 + entry.depth * 14 }}>
+                        <input
+                          key={entry.title}
+                          aria-label={`Bookmark ${index + 1} title`}
+                          defaultValue={entry.title}
+                          autoFocus={focusBookmark === entry.id}
+                          onFocus={(event) => {
+                            if (focusBookmark === entry.id) {
+                              event.currentTarget.select();
+                              setFocusBookmark(null);
+                            }
+                          }}
+                          onBlur={(event) => {
+                            const title = event.target.value.trim();
+                            if (title && title !== entry.title) updateBookmark(index, { title });
+                            else event.target.value = entry.title;
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") event.currentTarget.blur();
+                            if (event.key === "Escape") {
+                              event.currentTarget.value = entry.title;
+                              event.currentTarget.blur();
+                            }
+                          }}
+                        />
+                        <button className="iconButton" aria-label={`Move ${entry.title} up`} disabled={!index} onClick={() => moveBookmark(index, -1)}>
+                          <ArrowUp />
+                        </button>
+                        <button className="iconButton" aria-label={`Move ${entry.title} down`} disabled={index === bookmarks.length - 1} onClick={() => moveBookmark(index, 1)}>
+                          <ArrowDown />
+                        </button>
+                        <button className="iconButton" aria-label={`Outdent ${entry.title}`} disabled={!entry.depth} onClick={() => updateBookmark(index, { depth: entry.depth - 1 })}>
+                          <IndentDecrease />
+                        </button>
+                        <button
+                          className="iconButton"
+                          aria-label={`Indent ${entry.title}`}
+                          disabled={!index || entry.depth > bookmarks[index - 1]!.depth || entry.depth >= 8}
+                          onClick={() => updateBookmark(index, { depth: entry.depth + 1 })}
+                        >
+                          <IndentIncrease />
+                        </button>
+                        <button className="iconButton" aria-label={`Delete ${entry.title}`} onClick={() => setBookmarks(bookmarks.filter((_, item) => item !== index))}>
+                          <Trash2 />
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        key={entry.id}
+                        className="outlineEntry"
+                        style={{ paddingLeft: 8 + entry.depth * 14 }}
+                        disabled={entry.page === null && !entry.uri}
+                        onClick={() => {
+                          if (entry.page !== null) goTo(entry.page, entry.top ?? 0);
+                          else if (entry.uri) followLink({ x: 0, y: 0, width: 0, height: 0, uri: entry.uri });
+                          if (isPhone) setShowRail(false);
+                        }}
+                      >
+                        <span>{entry.title}</span>
+                        {entry.page !== null && <small>{doc.pageOrder.indexOf(entry.page) + 1 || "–"}</small>}
+                      </button>
+                    ),
+                  )
                 ) : (
                   <p className="empty">
-                    <BookOpen /> This document has no outline.
+                    <BookOpen /> No bookmarks yet. Add one to jump back to this page later.
                   </p>
                 )}
               </nav>
