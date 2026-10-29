@@ -14,7 +14,7 @@ WPS Office's PDF tool sets the bar this plan aims for. It covers reading, editin
 | Fill & sign | Fill, create fields, signatures | Done, including certificates | — |
 | Pages | Merge, split, insert, extract, rotate, crop, resize | Done (M2) | — |
 | Protect | Encrypt, permissions, redact | Done | — |
-| Convert | PDF ↔ Word/Excel/PPT, images, text | Images ↔ PDF, text | Large: Word/Excel/PPT |
+| Convert | PDF ↔ Word/Excel/PPT, images, text | Done (M4), except PowerPoint → PDF | Small |
 | Scan | Camera capture, edge detection, perspective fix, OCR | Done (M3) | — |
 | Extras | AI summary/translate, cloud sync | — | Optional; must respect local-first |
 
@@ -45,10 +45,12 @@ WPS Office's PDF tool sets the bar this plan aims for. It covers reading, editin
 - Multi-page scan sessions, with OCR straight into searchable PDFs.
 - How it works: the page is the large, high-contrast, nearly four-sided region in a downscaled frame; its corners come from the convex hull. The true page proportions are recovered from the perspective (Zhang and He's whiteboard method), and the Document filter divides by an estimate of the paper brightness to remove shadows. Everything runs on the device.
 
-### M4. Conversion
+### M4. Conversion (done)
 - PDF → DOCX locally, using reading-order text, styles and images.
 - PDF → XLSX for tables, and PDF → PPTX with one page per slide.
 - Office → PDF as an optional, lazily loaded module. Running a full office engine in the browser is large, so it must stay out of the main bundle.
+- How it works: the engine reports each page's styled text runs, images, ruled shapes and table grids. A shared structure pass (`apps/web/src/convert/structure.ts`) builds lines, paragraphs, headings, lists, tables (from ruling lines) and reading order, including two-column text. Small OOXML writers produce the files. Word and Excel files are read into HTML and laid out into pages by MuPDF's HTML engine.
+- Not covered yet: PowerPoint → PDF; legacy .doc/.xls/.ppt; Word headers, footers and footnotes; floating text boxes; Excel formulas that have no saved result; charts.
 
 ### M5. Reading extras
 - Read aloud with the system speech engine, and auto-scroll.

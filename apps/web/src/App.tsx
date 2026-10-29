@@ -39,6 +39,9 @@ import {
   ImagePlus,
   Images,
   ScanLine,
+  ArrowLeftRight,
+  FileSpreadsheet,
+  Presentation,
   Info,
   Italic,
   Keyboard,
@@ -91,6 +94,7 @@ import {
   type PageLink,
   type PageImage,
   type PageInfo,
+  type PageLayout,
   type PdfMetadata,
   type PositionedTextLine,
   type SignatureStatus,
@@ -146,6 +150,12 @@ const commonFonts = ["Helvetica", "Arial", "Calibri", "Times New Roman", "Georgi
 const formatBytes = (bytes: number) =>
   bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 const baseName = (name: string) => name.replace(/\.pdf$/i, "");
+const OPENABLE = "application/pdf,.pdf,.docx,.xlsx,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+const officeKind = (name: string) => {
+  const extension = name.toLowerCase().split(".").pop() ?? "";
+  if (["pdf", "docx", "xlsx", "pptx"].includes(extension)) return extension as "pdf" | "docx" | "xlsx" | "pptx";
+  return ["doc", "xls", "ppt", "rtf", "odt", "ods", "odp"].includes(extension) ? "legacy" : null;
+};
 const errorText = (cause: unknown, fallback: string) =>
   cause instanceof Error ? cause.message.replace(/^(PASSWORD_REQUIRED|PASSWORD_INCORRECT): /, "") : fallback;
 const isPasswordError = (cause: unknown) =>
@@ -216,8 +226,11 @@ export function App() {
   const [open, setOpen] = useState<OpenDoc | null>(null);
   const [tab, setTab] = useState<TabId>("edit");
   const [dialog, setDialog] = useState<
-    null | "properties" | "forms" | "find" | "ocr" | "pages" | "layout" | "compress" | "imageCrop" | "pageImages" | "security" | "shortcuts" | "split" | "pageSize"
+    null | "properties" | "forms" | "find" | "ocr" | "pages" | "layout" | "compress" | "imageCrop" | "pageImages" | "security" | "shortcuts" | "split" | "pageSize" | "convert"
   >(null);
+  const [convertFormat, setConvertFormat] = useState<"docx" | "xlsx" | "pptx" | "txt">("docx");
+  const [convertScope, setConvertScope] = useState<"all" | "page" | "range">("all");
+  const [convertRange, setConvertRange] = useState("");
   const [scanning, setScanning] = useState<null | { at: number | null }>(null);
   const [pendingOcr, setPendingOcr] = useState<null | { sources: number[]; language: OcrLanguage }>(null);
   const scanBack = useRef<(() => boolean) | null>(null);
@@ -450,15 +463,47 @@ export function App() {
     [hydrate, reset, withPassword, restartEngine, fail],
   );
 
+  /**
+   * PDF bytes for a file: PDFs as they are, Word and Excel files laid out
+   * into pages on this device. The converters load only when needed.
+   */
+  const pdfBytesOf = useCallback(
+    async (file: File) => {
+      const kind = officeKind(file.name);
+      if (kind === "pdf" || (!kind && file.type === "application/pdf")) return file.arrayBuffer();
+      if (kind === "docx" || kind === "xlsx") {
+        setBusy(`Converting ${kind === "docx" ? "the Word document" : "the workbook"}…`);
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const parts = kind === "docx" ? await (await import("./convert/fromDocx")).docxToHtml(bytes) : await (await import("./convert/fromXlsx")).xlsxToHtml(bytes);
+        await withTimeout(engine.current!.ready, 20_000, "The PDF engine took too long to start.");
+        const pdf = await withTimeout(engine.current!.api.htmlToPdf(parts), 120_000, "Laying out the document took too long.");
+        const copy = new Uint8Array(pdf.byteLength);
+        copy.set(pdf);
+        return copy.buffer;
+      }
+      throw new Error(
+        kind === "legacy"
+          ? "Older .doc, .xls and .ppt files can't be opened. Save them as .docx, .xlsx or PDF first."
+          : kind === "pptx"
+            ? "PowerPoint files can't be opened yet. Save the presentation as PDF first."
+            : "Choose a PDF, Word (.docx) or Excel (.xlsx) file.",
+      );
+    },
+    [],
+  );
+
   const load = useCallback(
     async (file: File) => {
-      if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
-        setError("Choose a PDF file.");
-        return;
+      setError("");
+      try {
+        const bytes = await pdfBytesOf(file);
+        await openBytes({ id: crypto.randomUUID(), name: file.name.replace(/\.(docx|xlsx)$/i, ".pdf"), bytes });
+      } catch (cause) {
+        fail(cause, "The file could not be opened.");
+        setBusy("");
       }
-      await openBytes({ id: crypto.randomUUID(), name: file.name, bytes: await file.arrayBuffer() });
     },
-    [openBytes],
+    [openBytes, pdfBytesOf, fail],
   );
 
   const createFromImages = useCallback(
@@ -904,17 +949,79 @@ export function App() {
       setBusy("");
     }
   };
-  const exportText = async () => {
+  const exportText = async (indexes?: number[]) => {
     if (!open) return;
     setBusy("Extracting text…");
     try {
-      const pages = await api().textOfBytes(await renderedExport());
+      const pages = await api().textOfBytes(await renderedExport(indexes ? indexes.map((index) => doc.pageOrder[index]!) : undefined));
       const text = pages.map((content, index) => `--- Page ${index + 1} ---\n${content.trim()}`).join("\n\n");
       const message = await downloadBlob(new Blob([text], { type: "text/plain" }), `${baseName(open.name)}.txt`);
       setNotice(`Text of ${pages.length} page${pages.length === 1 ? "" : "s"} saved. ${message}.`);
     } catch (cause) {
       fail(cause, "Text export failed.");
     } finally {
+      setBusy("");
+    }
+  };
+
+  /**
+   * Converts the document, with all edits, to Word, Excel, PowerPoint or text.
+   * The converters load only when first used.
+   */
+  const convertDocument = async (format: typeof convertFormat, indexes: number[]) => {
+    if (!open || !indexes.length) return;
+    if (format === "txt") {
+      setDialog(null);
+      await exportText(indexes);
+      return;
+    }
+    setError("");
+    try {
+      setBusy("Preparing the document…");
+      const bytes = await renderedExport(indexes.map((index) => doc.pageOrder[index]!));
+      const source = () => bytes.slice().buffer;
+      const layouts: PageLayout[] = [];
+      for (let start = 0; start < indexes.length; start += 4) {
+        setBusy(`Reading page ${start + 1} of ${indexes.length}…`);
+        const pages = Array.from({ length: Math.min(4, indexes.length - start) }, (_, offset) => start + offset);
+        layouts.push(...(await withTimeout(api().analyzeBytes(source(), pages), 120_000, "Reading the pages took too long.")));
+      }
+      setBusy("Writing the file…");
+      const title = baseName(open.name);
+      let output: Uint8Array;
+      if (format === "docx") output = await (await import("./convert/docx")).buildDocx(layouts, title);
+      else if (format === "xlsx") output = await (await import("./convert/xlsx")).buildXlsx(layouts, title);
+      else {
+        const backgrounds: Uint8Array[] = [];
+        for (const [index, layout] of layouts.entries()) {
+          setBusy(`Drawing slide ${index + 1} of ${layouts.length}…`);
+          // About 2× screen resolution, capped so huge pages stay reasonable.
+          const scale = Math.min(2, 2400 / Math.max(layout.width, layout.height));
+          backgrounds.push(await api().renderBytesWithoutText(source(), index, scale));
+        }
+        output = await (await import("./convert/pptx")).buildPptx(layouts, backgrounds, title);
+      }
+      const types = {
+        docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      };
+      const message = await saveFile(output, `${title}.${format}`, types[format]);
+      setNotice(`Converted ${indexes.length} page${indexes.length === 1 ? "" : "s"} to ${{ docx: "Word", xlsx: "Excel", pptx: "PowerPoint" }[format]}. ${message}.`);
+      setDialog(null);
+    } catch (cause) {
+      fail(cause, "The conversion failed.");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const insertFile = async (file: File, at: number, message: string) => {
+    try {
+      const bytes = await pdfBytesOf(file);
+      await appendPages({ type: "pdf", bytes }, at, message);
+    } catch (cause) {
+      fail(cause, "The file could not be added.");
       setBusy("");
     }
   };
@@ -1635,7 +1742,7 @@ export function App() {
       return;
     }
     if (open && /^image\//.test(file.type)) void addImage(file);
-    else if (open && file.name.toLowerCase().endsWith(".pdf")) void file.arrayBuffer().then((bytes) => appendPages({ type: "pdf", bytes }, doc.pageOrder.length, `${file.name} added at the end.`));
+    else if (open && officeKind(file.name)) void insertFile(file, doc.pageOrder.length, `${file.name} added at the end.`);
     else void load(file);
   };
 
@@ -1941,7 +2048,7 @@ export function App() {
           <label className="openButton">
             <FilePlus2 />
             Open a PDF
-            <input aria-label="Open PDF" type="file" accept="application/pdf,.pdf" onChange={pickFile(load)} />
+            <input aria-label="Open PDF" type="file" accept={OPENABLE} onChange={pickFile(load)} />
           </label>
           <button className="secondaryButton" onClick={() => setScanning({ at: null })}>
             <ScanLine />
@@ -1962,7 +2069,7 @@ export function App() {
               }}
             />
           </label>
-          <p className="dropcopy">or drop a PDF or photos anywhere on this page</p>
+          <p className="dropcopy">Word and Excel files open as PDFs too. Or drop files anywhere on this page.</p>
           {busy && (
             <p className="busyLine" role="status">
               <span className="spinner" /> {busy}
@@ -2085,6 +2192,7 @@ export function App() {
           active: readingTheme !== "day",
         },
         { key: "print", label: "Print", Icon: Printer, action: () => void printDocument(), title: "Print with all edits (Ctrl+P)" },
+        { key: "convert", label: "Convert", Icon: ArrowLeftRight, action: () => setDialog("convert"), title: "Convert to Word, Excel, PowerPoint or text" },
         { key: "text", label: "Export text", Icon: FileText, action: () => void exportText(), title: "Save all text as a .txt file" },
         { key: "ocr", label: "OCR scan", Icon: ScanText, action: () => { setOcrProgress(""); setDialog("ocr"); }, title: "Recognise text in scanned pages" },
         { key: "security", label: "Protect", Icon: Lock, action: () => setDialog("security"), title: "Passwords, permissions and digital signatures" },
@@ -2484,8 +2592,8 @@ export function App() {
     <>
       <input ref={inputs.image} hidden type="file" accept="image/png,image/jpeg" onChange={pickFile(addImage)} />
       <input ref={inputs.attachment} hidden type="file" onChange={pickFile(chooseAttachment)} />
-      <input ref={inputs.merge} hidden type="file" accept="application/pdf,.pdf" onChange={pickFile((file) => file.arrayBuffer().then((bytes) => appendPages({ type: "pdf", bytes }, doc.pageOrder.length, `${file.name} added at the end.`)))} />
-      <input ref={inputs.insertPdf} hidden type="file" accept="application/pdf,.pdf" onChange={pickFile((file) => file.arrayBuffer().then((bytes) => appendPages({ type: "pdf", bytes }, page + 1, `${file.name} inserted.`)))} />
+      <input ref={inputs.merge} hidden type="file" accept={OPENABLE} onChange={pickFile((file) => insertFile(file, doc.pageOrder.length, `${file.name} added at the end.`))} />
+      <input ref={inputs.insertPdf} hidden type="file" accept={OPENABLE} onChange={pickFile((file) => insertFile(file, page + 1, `${file.name} inserted.`))} />
       <input ref={inputs.replaceImage} hidden type="file" accept="image/png,image/jpeg" onChange={pickFile(replaceSelectedImage)} />
       <input ref={inputs.nativeReplace} hidden type="file" accept="image/png,image/jpeg" onChange={pickFile(replaceNativeImage)} />
       <input
@@ -3327,6 +3435,60 @@ export function App() {
           </label>
         </Modal>
       )}
+
+      {dialog === "convert" && (() => {
+        const plan = convertScope === "all" ? { groups: [doc.pageOrder.map((_, index) => index)] } : convertScope === "page" ? { groups: [[page]] } : parseRanges(convertRange, doc.pageOrder.length);
+        const indexes = "groups" in plan ? [...new Set(plan.groups.flat())] : [];
+        const formats = [
+          ["docx", "Word", ".docx — editable text, headings, lists, tables and pictures", FileText],
+          ["xlsx", "Excel", ".xlsx — tables and numbers, one sheet per page", FileSpreadsheet],
+          ["pptx", "PowerPoint", ".pptx — one slide per page, text stays editable", Presentation],
+          ["txt", "Plain text", ".txt — just the words", FileText],
+        ] as const;
+        return (
+          <Modal
+            title="Convert"
+            description="Converted on this device; nothing is uploaded. Layouts are rebuilt, so complex pages may need small touch-ups."
+            onClose={() => setDialog(null)}
+            footer={
+              <>
+                <button onClick={() => setDialog(null)}>Cancel</button>
+                <button className="primary" disabled={!indexes.length || Boolean(busy)} onClick={() => void convertDocument(convertFormat, indexes)}>
+                  {busy || `Convert ${indexes.length} page${indexes.length === 1 ? "" : "s"}`}
+                </button>
+              </>
+            }
+          >
+            <div className="choiceList" role="radiogroup" aria-label="Format">
+              {formats.map(([id, label, detail, Icon]) => (
+                <button key={id} role="radio" aria-checked={convertFormat === id} className={convertFormat === id ? "selected" : ""} onClick={() => setConvertFormat(id)}>
+                  <b>
+                    <Icon /> {label}
+                  </b>
+                  <span>{detail}</span>
+                </button>
+              ))}
+            </div>
+            <div className="fieldGrid">
+              <label>
+                Pages
+                <select value={convertScope} onChange={(event) => setConvertScope(event.target.value as typeof convertScope)}>
+                  <option value="all">All pages</option>
+                  <option value="page">This page ({page + 1})</option>
+                  <option value="range">Page range…</option>
+                </select>
+              </label>
+              {convertScope === "range" && (
+                <label>
+                  Pages to convert
+                  <input value={convertRange} placeholder={`e.g. 1-3, 5`} onChange={(event) => setConvertRange(event.target.value)} />
+                </label>
+              )}
+            </div>
+            {"error" in plan && convertScope === "range" && convertRange.trim() && <p className="fieldError">{plan.error}</p>}
+          </Modal>
+        );
+      })()}
 
       {dialog === "compress" && (
         <Modal title="Compress" description="Choose a lossless optimisation profile for exports." onClose={() => setDialog(null)} footer={<><button onClick={() => void estimateCompression()} disabled={estimatingCompression}>{estimatingCompression ? "Estimating…" : "Estimate size"}</button><button className="primary" onClick={() => setDialog(null)}>Use this profile</button></>}>
