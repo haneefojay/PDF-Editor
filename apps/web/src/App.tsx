@@ -38,6 +38,7 @@ import {
   ImageDown,
   ImagePlus,
   Images,
+  ScanLine,
   Info,
   Italic,
   Keyboard,
@@ -84,6 +85,7 @@ import {
   PASSWORD_REQUIRED,
   type AppendOperation,
   type AppendResult,
+  type ImagePageSize,
   type FormField,
   type OutlineEntry,
   type PageLink,
@@ -116,6 +118,7 @@ import { boundsOf } from "./geometry";
 import { layoutOverlays } from "./layout";
 import { findParagraph, reflowWidth } from "./paragraphs";
 import { createZip, describeGroup, parseRanges, splitEvery } from "./split";
+import { ScanSession, type ScanResult } from "./scan/ScanSession";
 import { PAGE_SIZES, mapCrop, mapOverlay, mmToPoints, pointsToMm, presetOf, targetSize, type Orientation, type PageSizePreset } from "./pageSize";
 
 type Engine = ReturnType<typeof createPdfEngine>;
@@ -215,6 +218,9 @@ export function App() {
   const [dialog, setDialog] = useState<
     null | "properties" | "forms" | "find" | "ocr" | "pages" | "layout" | "compress" | "imageCrop" | "pageImages" | "security" | "shortcuts" | "split" | "pageSize"
   >(null);
+  const [scanning, setScanning] = useState<null | { at: number | null }>(null);
+  const [pendingOcr, setPendingOcr] = useState<null | { sources: number[]; language: OcrLanguage }>(null);
+  const scanBack = useRef<(() => boolean) | null>(null);
   const [splitMode, setSplitMode] = useState<"every" | "ranges">("every");
   const [splitEveryDraft, setSplitEveryDraft] = useState(1);
   const [splitRangesDraft, setSplitRangesDraft] = useState("");
@@ -456,7 +462,7 @@ export function App() {
   );
 
   const createFromImages = useCallback(
-    async (files: File[]) => {
+    async (files: Blob[], options: { pageSize?: ImagePageSize; name?: string; ocrLanguage?: OcrLanguage } = {}) => {
       const images = files.filter((file) => /^image\/(png|jpe?g)$/.test(file.type));
       if (!images.length) {
         setError("Choose PNG or JPEG images.");
@@ -466,10 +472,12 @@ export function App() {
       setError("");
       try {
         await withTimeout(engine.current!.ready, 20_000, "The PDF engine took too long to start.");
-        const created = await engine.current!.api.createFromImages(await Promise.all(images.map((file) => file.arrayBuffer())));
+        const created = await engine.current!.api.createFromImages(await Promise.all(images.map((file) => file.arrayBuffer())), options.pageSize);
         const bytes = new Uint8Array(created.byteLength);
         bytes.set(created);
-        await openBytes({ id: crypto.randomUUID(), name: `${images[0]!.name.replace(/\.[^.]+$/, "")}.pdf`, bytes: bytes.buffer });
+        const name = options.name ?? `${(images[0] instanceof File ? images[0].name : "Images").replace(/\.[^.]+$/, "")}.pdf`;
+        await openBytes({ id: crypto.randomUUID(), name, bytes: bytes.buffer });
+        if (options.ocrLanguage) setPendingOcr({ sources: images.map((_, index) => index), language: options.ocrLanguage });
       } catch (cause) {
         fail(cause, "The images could not be converted.");
         setBusy("");
@@ -700,6 +708,7 @@ export function App() {
   useEffect(() => {
     let dispose = () => undefined;
     void registerBackHandler(() => {
+      if (scanBack.current) return scanBack.current();
       if (passwordRequest) {
         answerPassword(null);
         return true;
@@ -946,6 +955,7 @@ export function App() {
       execute({ type: "batch", commands });
       setPage(at);
       setNotice(`${message} Undo removes ${result.count === 1 ? "it" : "them"} again.`);
+      return result;
     } catch (cause) {
       fail(cause, "The page operation failed.");
     } finally {
@@ -1535,15 +1545,16 @@ export function App() {
 
   // --- OCR ------------------------------------------------------------------
 
-  const runOcr = async () => {
+  const runOcr = async (target?: { sources: number[]; language: OcrLanguage }) => {
     if (!open || ocrRunning) return;
-    const pages = ocrScope === "document" ? [...doc.pageOrder] : [sourcePage];
+    const pages = target ? target.sources : ocrScope === "document" ? [...doc.pageOrder] : [sourcePage];
     setOcrRunning(true);
     setError("");
     setOcrProgress("Loading the on-device OCR engine…");
     let recognizer: Awaited<ReturnType<typeof createOcrRecognizer>> | null = null;
     try {
-      recognizer = await createOcrRecognizer({ language: ocrLanguage, enhancement: scanEnhancement, autoDeskew }, (message) => setOcrProgress(`${message.status} · ${Math.round(message.progress * 100)}%`));
+      // Scans arrive already cleaned up and straightened.
+      recognizer = await createOcrRecognizer(target ? { language: target.language, enhancement: "none", autoDeskew: false } : { language: ocrLanguage, enhancement: scanEnhancement, autoDeskew }, (message) => setOcrProgress(`${message.status} · ${Math.round(message.progress * 100)}%`));
       const created: TextOverlay[] = [];
       for (let index = 0; index < pages.length; index += 1) {
         const source = pages[index]!;
@@ -1573,6 +1584,42 @@ export function App() {
       setOcrProgress("");
     }
   };
+
+  // Scans asked to be searchable are recognised as soon as their pages exist.
+  useEffect(() => {
+    if (!pendingOcr || !open || ocrRunning || pendingOcr.sources.some((source) => !open.pages[source])) return;
+    const target = pendingOcr;
+    setPendingOcr(null);
+    setOcrLanguage(target.language);
+    setDialog("ocr");
+    void runOcr(target);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingOcr, open, ocrRunning]);
+
+  const finishScan = async (result: ScanResult, at: number | null) => {
+    setScanning(null);
+    const language = result.ocr ? (result.language as OcrLanguage) : undefined;
+    if (at === null) {
+      const stamp = new Date();
+      const two = (value: number) => String(value).padStart(2, "0");
+      const name = `Scan ${stamp.getFullYear()}-${two(stamp.getMonth() + 1)}-${two(stamp.getDate())} ${two(stamp.getHours())}.${two(stamp.getMinutes())}.pdf`;
+      await createFromImages(result.images, { pageSize: result.pageSize, name, ocrLanguage: language });
+      return;
+    }
+    const images = await Promise.all(result.images.map((image) => image.arrayBuffer()));
+    const added = await appendPages({ type: "images", images, pageSize: result.pageSize }, at, `${images.length} scanned page${images.length === 1 ? "" : "s"} added.`);
+    if (added && language) setPendingOcr({ sources: Array.from({ length: added.count }, (_, index) => added.firstIndex + index), language });
+  };
+  const scanner = scanning && (
+    <ScanSession
+      appending={scanning.at !== null}
+      languages={ocrLanguages}
+      defaultLanguage={ocrLanguage}
+      backRef={scanBack}
+      onCancel={() => setScanning(null)}
+      onDone={(result) => void finishScan(result, scanning.at)}
+    />
+  );
 
   const pickFile = (handler: (file: File) => unknown) => (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -1896,6 +1943,10 @@ export function App() {
             Open a PDF
             <input aria-label="Open PDF" type="file" accept="application/pdf,.pdf" onChange={pickFile(load)} />
           </label>
+          <button className="secondaryButton" onClick={() => setScanning({ at: null })}>
+            <ScanLine />
+            Scan a document
+          </button>
           <label className="secondaryButton">
             <Images />
             Create a PDF from images
@@ -1942,6 +1993,7 @@ export function App() {
         <footer>AGPL-3.0 · No uploads · No analytics</footer>
         {passwordDialog}
         {toasts}
+        {scanner}
       </main>
     );
 
@@ -2007,6 +2059,7 @@ export function App() {
         { key: "blank", label: "Blank page", Icon: FilePlus2, action: () => void appendPages({ type: "blank", width: pageInfo.width, height: pageInfo.height }, page + 1, "Blank page inserted.") },
         { key: "duplicate", label: "Duplicate page", Icon: Copy, action: () => void appendPages({ type: "copy", source: sourcePage }, page + 1, "Page duplicated with its edits.", sourcePage) },
         { key: "insert", label: "Insert PDF", Icon: Merge, action: () => inputs.insertPdf.current?.click(), title: "Insert another PDF after this page" },
+        { key: "scanPages", label: "Scan pages", Icon: ScanLine, action: () => setScanning({ at: page + 1 }), title: "Scan paper pages with the camera and insert them after this page" },
         { key: "imagePages", label: "Images as pages", Icon: Images, action: () => inputs.imagePages.current?.click(), title: "Insert photos or scans as new pages" },
         { key: "merge", label: "Append PDF", Icon: FileOutput, action: () => inputs.merge.current?.click(), title: "Add another PDF at the end" },
         { key: "pageImage", label: "Page to image", Icon: ImageDown, action: () => void savePageImage(), title: "Save this page as a PNG image" },
@@ -3480,6 +3533,7 @@ export function App() {
       )}
       {passwordDialog}
       {toasts}
+      {scanner}
     </div>
   );
 }

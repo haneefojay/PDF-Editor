@@ -314,3 +314,14 @@ test("changes the page size with edits kept, then splits into a ZIP", async ({ p
   await page.getByRole("button", { name: "Undo" }).click();
   expect(inspectPdf(await exportPdf(page)).pages.map((item) => item.size)).toEqual([[612, 792], [612, 792], [792, 612]]);
 });
+
+test("the scanner offers photos when no camera can be used", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Scan a document" }).click();
+  const scanner = page.getByRole("dialog", { name: "Scan document" });
+  await expect(scanner).toContainText("instead");
+  await expect(scanner.getByRole("button", { name: "Take a photo" })).toBeVisible();
+  await expect(scanner.getByRole("button", { name: "Take photo" })).toBeDisabled();
+  await scanner.getByRole("button", { name: "Close scanner" }).click();
+  await expect(scanner).toBeHidden();
+});

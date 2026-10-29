@@ -25,5 +25,9 @@ const manifestPath = "android/app/src/main/AndroidManifest.xml";
 const manifest = readFileSync(manifestPath, "utf8")
   .replace('android:allowBackup="true"', 'android:allowBackup="false"\n        android:usesCleartextTraffic="false"')
   .replace(/\s*<uses-permission android:name="android.permission.INTERNET"\s*\/>/, "");
-writeFileSync(manifestPath, manifest);
-console.log("Android project prepared with backup and cleartext traffic disabled.");
+// The scanner uses the camera through the WebView; it stays optional so
+// devices without one can still install the app.
+const cameraPermission = '<uses-permission android:name="android.permission.CAMERA" />\n    <uses-feature android:name="android.hardware.camera" android:required="false" />';
+const withCamera = manifest.includes("android.permission.CAMERA") ? manifest : manifest.replace("</manifest>", `    ${cameraPermission}\n</manifest>`);
+writeFileSync(manifestPath, withCamera);
+console.log("Android project prepared with backup and cleartext traffic disabled and optional camera access.");
