@@ -95,6 +95,7 @@ import {
   type AppendOperation,
   type AppendResult,
   type ImagePageSize,
+  type FileAnnotation,
   type FormField,
   type OutlineEntry,
   type PageLink,
@@ -158,6 +159,12 @@ const commonFonts = ["Helvetica", "Arial", "Calibri", "Times New Roman", "Georgi
 const formatBytes = (bytes: number) =>
   bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 const baseName = (name: string) => name.replace(/\.pdf$/i, "");
+const ANNOTATION_LABELS: Record<string, string> = {
+  Text: "Note", FreeText: "Text box", Highlight: "Highlight", Underline: "Underline", StrikeOut: "Strikeout", Squiggly: "Squiggly",
+  Ink: "Drawing", Square: "Rectangle", Circle: "Ellipse", Line: "Line", Polygon: "Polygon", PolyLine: "Polyline", Stamp: "Stamp",
+  FileAttachment: "Attachment", Caret: "Insertion", Sound: "Sound",
+};
+const annotationLabel = (type: string) => ANNOTATION_LABELS[type] ?? type;
 const OPENABLE = "application/pdf,.pdf,.docx,.xlsx,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 const officeKind = (name: string) => {
   const extension = name.toLowerCase().split(".").pop() ?? "";
@@ -332,6 +339,7 @@ export function App() {
   // Text runs and links per source page, fetched as pages come into view.
   const [pageData, setPageData] = useState<Map<number, { lines: PositionedTextLine[]; links: PageLink[]; images: PageImageBox[] }>>(new Map());
   const [outline, setOutline] = useState<OutlineEntry[]>([]);
+  const [fileAnnotations, setFileAnnotations] = useState<FileAnnotation[]>([]);
   const [railTab, setRailTab] = useState<"pages" | "outline">("pages");
   const [readingTheme, setReadingTheme] = useState<"day" | "night" | "sepia">(() => {
     try {
@@ -606,6 +614,10 @@ export function App() {
       .getOutline()
       .then((entries) => active && setOutline(entries))
       .catch(() => active && setOutline([]));
+    void api()
+      .listAnnotations()
+      .then((items) => active && setFileAnnotations(items))
+      .catch(() => active && setFileAnnotations([]));
     return () => {
       active = false;
     };
@@ -2207,6 +2219,10 @@ export function App() {
   const ocrText = doc.overlays.filter((overlay): overlay is TextOverlay => overlay.kind === "text" && Boolean(overlay.ocrSource));
   const lowConfidenceOcr = ocrText.filter((overlay) => (overlay.ocrConfidence ?? 100) < confidenceThreshold);
   const reviewOverlays = doc.overlays.filter(isReviewOverlay);
+  // Annotations from the file, on pages still in the document, in page order.
+  const fileInDocument = fileAnnotations
+    .filter((item) => doc.pageOrder.includes(item.page))
+    .sort((a, b) => doc.pageOrder.indexOf(a.page) - doc.pageOrder.indexOf(b.page) || a.y - b.y);
   const filteredReviews = reviewOverlays.filter((overlay) => commentFilter === "all" || (commentFilter === "resolved" ? overlay.resolved : !overlay.resolved));
   const fontOptions = Array.from(new Set([...textLines.map((line) => line.fontName), ...current.filter((item): item is TextOverlay => item.kind === "text").map((item) => item.fontName || item.fontFamily), ...commonFonts].filter(Boolean)));
 
@@ -3077,7 +3093,9 @@ export function App() {
             <header>
               <div>
                 <b>Comments</b>
-                <span>{reviewOverlays.filter((item) => !item.resolved).length} open</span>
+                <span>
+                  {reviewOverlays.filter((item) => !item.resolved).length} open{fileInDocument.length ? ` · ${fileInDocument.length} in the file` : ""}
+                </span>
               </div>
               <button className="iconButton" aria-label="Close comments" onClick={() => setShowComments(false)}>
                 <X />
@@ -3123,6 +3141,34 @@ export function App() {
                 ))
               ) : (
                 <p className="empty">{reviewOverlays.length ? "No comments match this filter." : "No comments yet. Use Highlight, Note, Stamp or Measure to start a review."}</p>
+              )}
+              {commentFilter === "all" && fileInDocument.length > 0 && (
+                <>
+                  <h3 className="reviewGroup">Already in the file ({fileInDocument.length})</h3>
+                  {fileInDocument.map((item) => (
+                    <article key={item.id} className="fileAnnotation">
+                      <button
+                        className="reviewJump"
+                        onClick={() => {
+                          goTo(item.page, item.y);
+                          setSearchHighlight({ sourcePage: item.page, rect: { x: item.x, y: item.y, width: item.width, height: item.height } });
+                          if (isPhone) setShowComments(false);
+                        }}
+                      >
+                        <span>
+                          {item.color && <i className="swatch" style={{ background: item.color }} />}
+                          Page {doc.pageOrder.indexOf(item.page) + 1} · {annotationLabel(item.type)}
+                        </span>
+                        <b>{item.text || item.comment || annotationLabel(item.type)}</b>
+                        {item.text && item.comment && <p>{item.comment}</p>}
+                        <small>
+                          {item.author || "Unknown author"}
+                          {item.modified ? ` · ${new Date(item.modified).toLocaleString()}` : ""}
+                        </small>
+                      </button>
+                    </article>
+                  ))}
+                </>
               )}
             </div>
             <footer>

@@ -275,3 +275,29 @@ export function outlineOf(bytes: Buffer) {
   doc.destroy();
   return rows;
 }
+
+/** Three pages; page 3 has a highlight with a comment and a sticky note from another app. */
+export function annotatedPdf() {
+  const doc = new mupdf.PDFDocument();
+  const resources = doc.newDictionary();
+  const fonts = doc.newDictionary();
+  fonts.put("F1", doc.addSimpleFont(new mupdf.Font("Helvetica")));
+  resources.put("Font", fonts);
+  for (let index = 0; index < 3; index += 1)
+    doc.insertPage(-1, doc.addPage([0, 0, 612, 792], 0, resources, `BT /F1 18 Tf 72 700 Td (Page ${index + 1} heading) Tj ET BT /F1 12 Tf 72 400 Td (The contract renews every year in March.) Tj ET`));
+  const page = doc.loadPage(2);
+  const highlight = page.createAnnotation("Highlight");
+  highlight.setQuadPoints([[72, 378, 320, 378, 72, 396, 320, 396]]);
+  highlight.setColor([1, 0.85, 0]);
+  highlight.setAuthor("Lee");
+  highlight.setContents("Is this still right?");
+  highlight.update();
+  const note = page.createAnnotation("Text");
+  note.setRect([500, 80, 520, 100]);
+  note.setContents("Signed copy is in the drawer.");
+  note.setAuthor("Sam");
+  note.update();
+  const bytes = Buffer.from(doc.saveToBuffer("").asUint8Array());
+  doc.destroy();
+  return bytes;
+}
