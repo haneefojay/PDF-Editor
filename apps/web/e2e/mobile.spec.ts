@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { longPdf, samplePdf } from "./fixtures";
+import { longPdf, presentationFile, samplePdf } from "./fixtures";
 import { expectAccessible, openSample, pageAt } from "./helpers";
 
 const bottomTab = (page: import("@playwright/test").Page, name: string) => page.locator(".bottomNav").getByRole("tab", { name });
@@ -24,6 +24,17 @@ test("phone shell fits the screen and opens tool trays from the bottom bar", asy
 
   await bottomTab(page, "Pages").tap();
   await expect(page.locator(".phoneDock .ribbon")).toHaveCount(0);
+});
+
+test("a PowerPoint file opens on a phone with wide slides fitted to the screen", async ({ page }) => {
+  await page.goto("/");
+  await page.setInputFiles('input[aria-label="Open PDF"]', { name: "garden.pptx", mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation", buffer: await presentationFile() });
+  await expect(page.locator(".page img").first()).toBeVisible({ timeout: 60_000 });
+  const viewport = page.viewportSize()!;
+  const slide = (await pageAt(page).boundingBox())!;
+  expect(slide.width).toBeLessThanOrEqual(viewport.width);
+  expect(slide.width / slide.height).toBeCloseTo(16 / 9, 1);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(viewport.width);
 });
 
 test("reading on a phone: original text is not editable until Edit is open", async ({ page }) => {

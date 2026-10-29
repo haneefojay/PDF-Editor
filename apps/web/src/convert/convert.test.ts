@@ -8,7 +8,7 @@ import { createEngine } from "../../../../packages/pdf-engine/src/engine";
 import { buildDocx } from "./docx";
 import { buildPptx } from "./pptx";
 import { buildXlsx, parseCell } from "./xlsx";
-import { columnsPdf, listsPdf, reportPdf } from "./samples";
+import { columnsPdf, listsPdf, presentationPptx, reportPdf } from "./samples";
 import { bodySize, structurePage } from "./structure";
 
 const engine = createEngine(mupdf);
@@ -204,6 +204,68 @@ describe("opening Office files", () => {
     for (const expected of ["Quarterly Report", "Revenue grew steadily", "Results by region", "$1,200,000", "Figure 1: Sales mix", "Appendix"]) expect(text).toContain(expected);
     expect(parts[0]!.html).toContain("<table");
     expect(parts[0]!.html).toContain("<img src=\"data:image/jpeg;base64,");
+  });
+
+  it("draws a PowerPoint file slide by slide, with what slides inherit from their layout and master", async () => {
+    const { pptxToSlides } = await import("./fromPptx");
+    const slides = await pptxToSlides(await presentationPptx());
+    // The hidden slide is left out.
+    expect(slides).toHaveLength(2);
+    const pdf = await engine.slidesToPdf(slides);
+    const { text, sizes } = pdfText(pdf);
+    expect(sizes).toEqual([[720, 405], [720, 405]]);
+    for (const expected of ["Garden Plan", "Build the beds", "Cedar, not pine", "Plant in spring", "Budget OK", "Item", "$900"]) expect(text).toContain(expected);
+    expect(text).toMatch(/1\.\s+Dig\s+2\.\s+Water/);
+    expect(text).not.toContain("Hidden draft");
+    expect(text).not.toContain("‹#›");
+    const doc = mupdf.Document.openDocument(pdf, "application/pdf");
+    const colourAt = (index: number, x: number, y: number) => {
+      const pixmap = doc.loadPage(index).toPixmap(mupdf.Matrix.identity, mupdf.ColorSpace.DeviceRGB, false, true);
+      const at = (Math.round(y) * pixmap.getWidth() + Math.round(x)) * 3;
+      return [...pixmap.getPixels().slice(at, at + 3)];
+    };
+    // The master's footer band in the theme's accent colour, on every slide.
+    expect(colourAt(0, 360, 395)).toEqual([0x2e, 0x7d, 0x32]);
+    expect(colourAt(1, 360, 395)).toEqual([0x2e, 0x7d, 0x32]);
+    // The default table style: an accent header row.
+    expect(colourAt(0, 490, 225)).toEqual([0x2e, 0x7d, 0x32]);
+    // Slide 3 keeps only the blue half of its picture, on the theme's dark background.
+    const [r, , b] = colourAt(1, 160, 160);
+    expect(b! - r!).toBeGreaterThan(150);
+    expect(colourAt(1, 20, 20)).toEqual([0x1f, 0x2a, 0x44]);
+    const second = doc.loadPage(1).toStructuredText("").asText();
+    expect(second.trim().split(/\s+/)).toContain("3");
+    // The title takes the master's position and style.
+    const title = (JSON.parse(doc.loadPage(0).toStructuredText("").asJSON()) as { blocks: { bbox: { x: number; y: number }; lines: { text: string; font: { size: number; weight: string } }[] }[] }).blocks.find((block) => block.lines.some((line) => line.text.includes("Garden Plan")))!;
+    expect(title.bbox.x).toBeGreaterThan(36);
+    expect(title.bbox.x).toBeLessThan(50);
+    expect(title.lines[0]!.font.size).toBeCloseTo(32, 0);
+    expect(title.lines[0]!.font.weight).toBe("bold");
+    doc.destroy();
+  });
+
+  it("reads back the presentations it writes", async () => {
+    const { pptxToSlides } = await import("./fromPptx");
+    const pdf = reportPdf();
+    const layouts = await engine.analyzeBytes(pdf);
+    const backgrounds = await Promise.all(layouts.map((_, index) => engine.renderBytesWithoutText(pdf, index, 1.5)));
+    const slides = await pptxToSlides(await buildPptx(layouts, backgrounds, "Report"));
+    const { text, sizes } = pdfText(await engine.slidesToPdf(slides));
+    expect(sizes).toEqual([[612, 792], [612, 792]]);
+    for (const expected of ["Quarterly Report", "Results by region", "$1,200,000", "Figure 1: Sales mix", "Appendix"]) expect(text).toContain(expected);
+  });
+
+  it("draws preset shapes inside their frames", async () => {
+    const { presetPath } = await import("./fromPptx");
+    for (const name of ["rect", "roundRect", "ellipse", "triangle", "diamond", "hexagon", "chevron", "rightArrow", "upArrow", "star5", "plus"]) {
+      const points = presetPath(name, 200, 100).flatMap((command) => (command[0] === "Z" ? [] : command.slice(1).reduce<number[][]>((pairs, value, index, all) => (index % 2 ? pairs : [...pairs, [value as number, all[index + 1] as number]]), [])));
+      for (const [x, y] of points) {
+        expect(x).toBeGreaterThanOrEqual(-0.01);
+        expect(x).toBeLessThanOrEqual(200.01);
+        expect(y).toBeGreaterThanOrEqual(-0.01);
+        expect(y).toBeLessThanOrEqual(100.01);
+      }
+    }
   });
 
   it("lays out an Excel file sheet by sheet", async () => {

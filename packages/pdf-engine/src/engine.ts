@@ -26,6 +26,9 @@ import type {
   PdfWorkerApi,
   PositionedTextLine,
   SignatureStatus,
+  SlideFill,
+  SlideMatrix,
+  SlidePath,
 } from "./protocol";
 import { PASSWORD_INCORRECT, PASSWORD_REQUIRED } from "./protocol";
 import { bundledFontBase64 } from "./fontData";
@@ -2163,6 +2166,136 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
         writer.close();
       }
       if (!pages) throw new Error("The document has no pages.");
+      const bytes = copyBytes(buffer.asUint8Array());
+      buffer.destroy();
+      return bytes;
+    },
+
+    async slidesToPdf(slides) {
+      if (!slides.length) throw new Error("The presentation has no slides.");
+      const rgb = mupdf.ColorSpace.DeviceRGB;
+      const toPath = (commands: SlidePath) => {
+        const path = new mupdf.Path();
+        for (const command of commands) {
+          if (command[0] === "M") path.moveTo(command[1], command[2]);
+          else if (command[0] === "L") path.lineTo(command[1], command[2]);
+          else if (command[0] === "C") path.curveTo(command[1], command[2], command[3], command[4], command[5], command[6]);
+          else path.closePath();
+        }
+        return path;
+      };
+      /** Draws a gradient inside a path as fine bands of colour, which every PDF viewer shows the same way. */
+      const fillGradient = (device: Mupdf.Device, clip: Mupdf.Path, matrix: SlideMatrix, gradient: NonNullable<SlideFill["gradient"]>) => {
+        const { stops, width, height } = gradient;
+        const sample = (at: number) => {
+          const after = stops.findIndex((stop) => stop.at >= at);
+          if (after <= 0) return after === 0 ? stops[0]! : stops.at(-1)!;
+          const [from, to] = [stops[after - 1]!, stops[after]!];
+          const mix = (at - from.at) / (to.at - from.at || 1);
+          return { color: from.color.map((value, index) => value + (to.color[index]! - value) * mix) as [number, number, number], alpha: from.alpha + (to.alpha - from.alpha) * mix };
+        };
+        const bands = 64;
+        device.clipPath(clip, false, matrix);
+        if (gradient.kind === "radial") {
+          // Rings from the outside in; the first stop is the centre.
+          const radius = Math.hypot(width, height) / 2;
+          for (let index = bands; index > 0; index -= 1) {
+            const ring = new mupdf.Path();
+            const r = (radius * index) / bands;
+            const k = 0.5523 * r;
+            const [cx, cy] = [width / 2, height / 2];
+            ring.moveTo(cx + r, cy);
+            ring.curveTo(cx + r, cy + k, cx + k, cy + r, cx, cy + r);
+            ring.curveTo(cx - k, cy + r, cx - r, cy + k, cx - r, cy);
+            ring.curveTo(cx - r, cy - k, cx - k, cy - r, cx, cy - r);
+            ring.curveTo(cx + k, cy - r, cx + r, cy - k, cx + r, cy);
+            ring.closePath();
+            const { color, alpha } = sample((index - 0.5) / bands);
+            device.fillPath(ring, false, matrix, rgb, color, alpha);
+          }
+        } else {
+          const radians = (gradient.angle * Math.PI) / 180;
+          const [dx, dy] = [Math.cos(radians), Math.sin(radians)];
+          const corners = [[0, 0], [width, 0], [0, height], [width, height]] as const;
+          const along = corners.map(([x, y]) => x * dx + y * dy);
+          const across = corners.map(([x, y]) => -x * dy + y * dx);
+          const [start, end] = [Math.min(...along), Math.max(...along)];
+          const [low, high] = [Math.min(...across), Math.max(...across)];
+          const point = (t: number, s: number): [number, number] => [t * dx - s * dy, t * dy + s * dx];
+          for (let index = 0; index < bands; index += 1) {
+            // Bands overlap slightly so no seams show between them.
+            const t0 = start + ((end - start) * index) / bands;
+            const t1 = start + ((end - start) * (index + 1)) / bands + (index < bands - 1 ? 0.5 : 0);
+            const band = new mupdf.Path();
+            band.moveTo(...point(t0, low));
+            band.lineTo(...point(t1, low));
+            band.lineTo(...point(t1, high));
+            band.lineTo(...point(t0, high));
+            band.closePath();
+            const { color, alpha } = sample((index + 0.5) / bands);
+            device.fillPath(band, false, matrix, rgb, color, alpha);
+          }
+        }
+        device.popClip();
+      };
+      const buffer = new mupdf.Buffer();
+      const writer = new mupdf.DocumentWriter(buffer, "pdf", "compress");
+      try {
+        for (const slide of slides) {
+          const device = writer.beginPage([0, 0, slide.width, slide.height]);
+          if (slide.background) {
+            const path = new mupdf.Path();
+            path.rect(0, 0, slide.width, slide.height);
+            device.fillPath(path, false, mupdf.Matrix.identity, rgb, slide.background, 1);
+          }
+          for (const item of slide.items) {
+            if (item.kind === "shape") {
+              const path = toPath(item.path);
+              if (item.fill?.gradient) fillGradient(device, path, item.matrix, item.fill.gradient);
+              else if (item.fill) device.fillPath(path, false, item.matrix, rgb, item.fill.color, item.fill.alpha);
+              if (item.stroke) {
+                const stroke = new mupdf.StrokeState({ lineCap: "Butt", lineJoin: "Miter", lineWidth: item.stroke.width, miterLimit: 10, dashes: item.stroke.dashes });
+                device.strokePath(path, stroke, item.matrix, rgb, item.stroke.color, item.stroke.alpha);
+              }
+            } else if (item.kind === "image") {
+              let image: Mupdf.Image;
+              try {
+                image = new mupdf.Image(item.data);
+              } catch {
+                // Formats MuPDF cannot read, such as EMF, are left out.
+                continue;
+              }
+              const clip = toPath(item.clip ?? [["M", 0, 0], ["L", item.width, 0], ["L", item.width, item.height], ["L", 0, item.height], ["Z"]]);
+              device.clipPath(clip, false, item.matrix);
+              // A cropped picture is drawn larger so that only the kept part fills the frame.
+              const crop = item.crop ?? { left: 0, top: 0, right: 0, bottom: 0 };
+              const across = Math.max(0.01, 1 - crop.left - crop.right);
+              const down = Math.max(0.01, 1 - crop.top - crop.bottom);
+              const width = item.width / across;
+              const height = item.height / down;
+              device.fillImage(image, mupdf.Matrix.concat([width, 0, 0, height, -crop.left * width, -crop.top * height], item.matrix), item.alpha);
+              device.popClip();
+            } else {
+              const html = mupdf.Document.openDocument(new TextEncoder().encode(item.html), "text/html");
+              try {
+                // One tall page holds all the text; overflow runs past the box as in PowerPoint.
+                html.layout(Math.max(1, item.width), 20_000, 11);
+                const page = html.loadPage(0);
+                const blocks = (JSON.parse(page.toStructuredText("").asJSON()) as { blocks: { bbox: { y: number; h: number } }[] }).blocks;
+                const used = blocks.reduce((bottom, block) => Math.max(bottom, block.bbox.y + block.bbox.h), 0);
+                const offset = item.anchor === "middle" ? (item.height - used) / 2 : item.anchor === "bottom" ? item.height - used : 0;
+                page.run(device, mupdf.Matrix.concat(mupdf.Matrix.translate(0, offset), item.matrix));
+                page.destroy();
+              } finally {
+                html.destroy();
+              }
+            }
+          }
+          writer.endPage();
+        }
+      } finally {
+        writer.close();
+      }
       const bytes = copyBytes(buffer.asUint8Array());
       buffer.destroy();
       return bytes;

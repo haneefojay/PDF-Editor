@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { readFile } from "node:fs/promises";
-import { colourAt, imageOnPanelPdf, inspectPdf, longPdf, PARAGRAPH_LINES, paragraphPdf, pngImage, readStoredZip, samplePdf, wordFile, excelFile, zipText, outlineOf, annotatedPdf, manyPagesPdf } from "./fixtures";
+import { colourAt, imageOnPanelPdf, inspectPdf, longPdf, PARAGRAPH_LINES, paragraphPdf, pngImage, readStoredZip, samplePdf, wordFile, excelFile, presentationFile, zipText, outlineOf, annotatedPdf, manyPagesPdf } from "./fixtures";
 import { clickOnPage, dragOnPage, exportPdf, fitPage, openSample, pageAt, tab, tool } from "./helpers";
 
 test("edits original text without disturbing the table around it", async ({ page }) => {
@@ -430,10 +430,26 @@ test("opens Word and Excel files as PDFs, and inserts them into a PDF", async ({
   expect(merged.pages[1]!.text).toMatch(/Raised beds\s+\$2,400\.00\s+2-Mar-26/);
 });
 
+test("opens a PowerPoint file as a PDF, one page per shown slide", async ({ page }) => {
+  await page.goto("/");
+  await page.setInputFiles('input[aria-label="Open PDF"]', { name: "garden.pptx", mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation", buffer: await presentationFile() });
+  await expect(page.locator(".page img").first()).toBeVisible({ timeout: 60_000 });
+  await expect(page.locator(".file h1")).toContainText("garden.pdf");
+  await expect(page.locator(".rail .thumb")).toHaveCount(2);
+  const slides = inspectPdf(await exportPdf(page));
+  expect(slides.pages.map((item) => item.size)).toEqual([[720, 405], [720, 405]]);
+  expect(slides.pages[0]!.text).toContain("Garden Plan");
+  expect(slides.pages[0]!.text).toContain("Budget OK");
+  expect(slides.pages[1]!.text).toMatch(/1\.\s+Dig/);
+  expect(slides.pages.map((item) => item.text).join(" ")).not.toContain("Hidden draft");
+});
+
 test("explains which files cannot be opened", async ({ page }) => {
   await page.goto("/");
-  await page.setInputFiles('input[aria-label="Open PDF"]', { name: "deck.pptx", mimeType: "application/octet-stream", buffer: Buffer.from("x") });
-  await expect(page.getByRole("alert")).toContainText("PowerPoint files can't be opened yet");
+  await page.setInputFiles('input[aria-label="Open PDF"]', { name: "deck.ppt", mimeType: "application/vnd.ms-powerpoint", buffer: Buffer.from("x") });
+  await expect(page.getByRole("alert")).toContainText("Older .doc, .xls and .ppt files can't be opened");
+  await page.setInputFiles('input[aria-label="Open PDF"]', { name: "broken.pptx", mimeType: "application/octet-stream", buffer: Buffer.from("x") });
+  await expect(page.getByRole("alert")).toContainText("not a valid Office document");
 });
 
 /** A stand-in speech engine: each utterance "ends" after a short pause. */

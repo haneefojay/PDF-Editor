@@ -90,6 +90,28 @@ export type LayoutImage = { x: number; y: number; width: number; height: number;
 export type LayoutRect = { x: number; y: number; width: number; height: number; color: string; stroked: boolean };
 /** A table grid: column and row boundaries in points. */
 export type LayoutTable = { columns: number[]; rows: number[]; ruled: boolean };
+/** A 2D transform [a, b, c, d, e, f] in page points, y pointing down. */
+export type SlideMatrix = [number, number, number, number, number, number];
+export type SlideColor = [number, number, number];
+export type SlidePath = (["M", number, number] | ["L", number, number] | ["C", number, number, number, number, number, number] | ["Z"])[];
+/**
+ * A solid colour, or a gradient across the item's width × height frame:
+ * linear at `angle` degrees clockwise from left to right, or radial from the centre.
+ */
+export type SlideFill = {
+  color: SlideColor;
+  alpha: number;
+  gradient?: { kind: "linear" | "radial"; angle: number; width: number; height: number; stops: { at: number; color: SlideColor; alpha: number }[] };
+};
+/**
+ * One thing drawn on a slide, in its own frame: (0, 0) is the item's top
+ * left corner and `matrix` places that frame on the slide.
+ */
+export type SlideItem =
+  | { kind: "shape"; matrix: SlideMatrix; path: SlidePath; fill?: SlideFill; stroke?: { color: SlideColor; alpha: number; width: number; dashes?: number[] } }
+  | { kind: "image"; matrix: SlideMatrix; width: number; height: number; data: Uint8Array; alpha: number; crop?: { left: number; top: number; right: number; bottom: number }; clip?: SlidePath }
+  | { kind: "text"; matrix: SlideMatrix; width: number; height: number; html: string; anchor: "top" | "middle" | "bottom" };
+export type SlidePart = { width: number; height: number; background?: SlideColor; items: SlideItem[] };
 export type PageLayout = { width: number; height: number; spans: LayoutSpan[]; images: LayoutImage[]; rects: LayoutRect[]; tables: LayoutTable[] };
 
 /** An annotation already in the file, for the annotation list. */
@@ -244,6 +266,8 @@ export interface PdfWorkerApi {
    * starts on a new page of its own size (in points).
    */
   htmlToPdf(parts: { html: string; width: number; height: number }[]): Promise<Uint8Array>;
+  /** Draws slides into PDF pages, one page per slide, at each slide's size in points. */
+  slidesToPdf(slides: SlidePart[]): Promise<Uint8Array>;
   /** A page rendered as PNG with its text removed, for slide backgrounds. */
   renderBytesWithoutText(bytes: ArrayBuffer, index: number, scale: number): Promise<Uint8Array>;
   /** Renders a page of another PDF (such as an export) without opening it. */

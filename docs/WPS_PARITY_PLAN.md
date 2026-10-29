@@ -14,7 +14,7 @@ WPS Office's PDF tool sets the bar this plan aims for. It covers reading, editin
 | Fill & sign | Fill, create fields, signatures | Done, including certificates | — |
 | Pages | Merge, split, insert, extract, rotate, crop, resize | Done (M2) | — |
 | Protect | Encrypt, permissions, redact | Done | — |
-| Convert | PDF ↔ Word/Excel/PPT, images, text | Done (M4), except PowerPoint → PDF | Small |
+| Convert | PDF ↔ Word/Excel/PPT, images, text | Done (M4) | — |
 | Scan | Camera capture, edge detection, perspective fix, OCR | Done (M3) | — |
 | Extras | AI summary/translate, cloud sync | — | Optional; must respect local-first |
 
@@ -49,8 +49,8 @@ WPS Office's PDF tool sets the bar this plan aims for. It covers reading, editin
 - PDF → DOCX locally, using reading-order text, styles and images.
 - PDF → XLSX for tables, and PDF → PPTX with one page per slide.
 - Office → PDF as an optional, lazily loaded module. Running a full office engine in the browser is large, so it must stay out of the main bundle.
-- How it works: the engine reports each page's styled text runs, images, ruled shapes and table grids. A shared structure pass (`apps/web/src/convert/structure.ts`) builds lines, paragraphs, headings, lists, tables (from ruling lines) and reading order, including two-column text. Small OOXML writers produce the files. Word and Excel files are read into HTML and laid out into pages by MuPDF's HTML engine.
-- Not covered yet: PowerPoint → PDF; legacy .doc/.xls/.ppt; Word headers, footers and footnotes; floating text boxes; Excel formulas that have no saved result; charts.
+- How it works: the engine reports each page's styled text runs, images, ruled shapes and table grids. A shared structure pass (`apps/web/src/convert/structure.ts`) builds lines, paragraphs, headings, lists, tables (from ruling lines) and reading order, including two-column text. Small OOXML writers produce the files. Word and Excel files are read into HTML and laid out into pages by MuPDF's HTML engine. PowerPoint files are drawn slide by slide (`apps/web/src/convert/fromPptx.ts`): each slide inherits shapes, placeholder positions, text styles and colours from its layout, master and theme; shapes, gradients, cropped pictures and tables are drawn directly, and the text of each box is laid out by MuPDF inside the box.
+- Not covered yet: legacy .doc/.xls/.ppt; PowerPoint charts, SmartArt, EMF pictures and effects such as shadows; Word headers, footers and footnotes; floating text boxes; Excel formulas that have no saved result; charts.
 
 ### M5. Reading extras (done)
 - Read aloud with the system speech engine, and auto-scroll.

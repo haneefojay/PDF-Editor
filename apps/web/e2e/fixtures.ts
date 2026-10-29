@@ -318,3 +318,9 @@ export function annotatedPdf() {
   doc.destroy();
   return bytes;
 }
+
+/** A small PowerPoint deck: two shown slides and one hidden one. */
+export async function presentationFile() {
+  const { presentationPptx } = await import("../src/convert/samples");
+  return Buffer.from(await presentationPptx());
+}
