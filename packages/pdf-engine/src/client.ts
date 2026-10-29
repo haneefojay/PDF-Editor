@@ -7,6 +7,7 @@ export {
 export type {
   AppendOperation,
   AppendResult,
+  ImagePageSize,
   DocumentInfo,
   ExportResult,
   FormField,

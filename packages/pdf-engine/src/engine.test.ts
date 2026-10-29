@@ -382,8 +382,21 @@ describe("images to PDF", () => {
     const bytes = await engine.createFromImages([png, png]);
     const doc = mupdf.Document.openDocument(bytes, "application/pdf");
     expect(doc.countPages()).toBe(2);
-    expect(doc.loadPage(0).getBounds()).toEqual([0, 0, 842, 595]);
+    expect(doc.loadPage(0).getBounds().map(Math.round)).toEqual([0, 0, 842, 595]);
     doc.destroy();
+  });
+
+  it("sizes image pages as asked", async () => {
+    const engine = createEngine(mupdf);
+    const size = async (pageSize: "a4" | "letter" | "fit") => {
+      const doc = mupdf.Document.openDocument(await engine.createFromImages([png], pageSize), "application/pdf");
+      const bounds = doc.loadPage(0).getBounds().map(Math.round);
+      doc.destroy();
+      return bounds;
+    };
+    expect(await size("letter")).toEqual([0, 0, 792, 612]);
+    // Shaped like the 2:1 image, long edge as on A4.
+    expect(await size("fit")).toEqual([0, 0, 842, 421]);
   });
 
   it("appends images as pages to an open document", async () => {
