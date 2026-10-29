@@ -1,4 +1,5 @@
 import * as mupdf from "mupdf";
+import { homography, project } from "../src/scan/geometry";
 
 /** A small report with a heading, a table, a coloured block and a rotated page. */
 export function samplePdf(saveOptions = "garbage=3,compress=yes") {
@@ -143,4 +144,70 @@ export function readStoredZip(bytes: Buffer) {
     at = start + size;
   }
   return files;
+}
+
+/** Where a 300×400 page lands in a photo taken by a pinhole camera, tilted back and turned a little. */
+function photographedCorners(width: number, height: number) {
+  const tilt = (30 * Math.PI) / 180;
+  const turn = (6 * Math.PI) / 180;
+  const focal = 0.95 * width;
+  const distance = 1.6 * focal * (400 / height);
+  return ([[-1, -1], [1, -1], [1, 1], [-1, 1]] as const).map(([sx, sy]) => {
+    const [x0, y0] = [sx * 150, sy * 200];
+    const [x1, y1] = [x0 * Math.cos(turn) - y0 * Math.sin(turn), x0 * Math.sin(turn) + y0 * Math.cos(turn)];
+    const z = distance - y1 * Math.sin(tilt);
+    return { x: (focal * x1) / z + width / 2, y: (focal * y1 * Math.cos(tilt)) / z + height / 2 };
+  });
+}
+
+/**
+ * A photo of a printed page lying at an angle on a dark desk: luminance values
+ * row by row. The page reads "INVOICE" and a total in large type.
+ */
+export function scanScene(width = 640, height = 480) {
+  const doc = new mupdf.PDFDocument();
+  const resources = doc.newDictionary();
+  const fonts = doc.newDictionary();
+  resources.put("Font", fonts);
+  fonts.put("F1", doc.addSimpleFont(new mupdf.Font("Helvetica-Bold")));
+  doc.insertPage(-1, doc.addPage([0, 0, 300, 400], 0, resources, "BT /F1 50 Tf 30 300 Td (INVOICE) Tj ET BT /F1 34 Tf 30 200 Td (TOTAL 250) Tj ET 0 g 30 120 240 6 re f"));
+  const pixmap = doc.loadPage(0).toPixmap([1, 0, 0, 1, 0, 0], mupdf.ColorSpace.DeviceGray, false, true);
+  const page = { width: pixmap.getWidth(), height: pixmap.getHeight(), pixels: pixmap.getPixels() };
+  const corners = photographedCorners(width, height);
+  const toPage = homography(corners, [
+    { x: 0, y: 0 },
+    { x: page.width, y: 0 },
+    { x: page.width, y: page.height },
+    { x: 0, y: page.height },
+  ]);
+  const luma = new Uint8Array(width * height);
+  let seed = 3;
+  const noise = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff) * 20;
+  for (let y = 0; y < height; y += 1)
+    for (let x = 0; x < width; x += 1) {
+      const point = project(toPage, { x: x + 0.5, y: y + 0.5 });
+      const onPage = point.x >= 0 && point.y >= 0 && point.x < page.width && point.y < page.height;
+      // Light falls off to the left, as from a window.
+      const light = 0.78 + 0.22 * (x / width);
+      luma[y * width + x] = onPage ? page.pixels[Math.floor(point.y) * page.width + Math.floor(point.x)]! * light : 55 + noise();
+    }
+  doc.destroy();
+  return { width, height, luma };
+}
+
+/** The scene as a Y4M video file for Chromium's fake camera. */
+export function scanVideo() {
+  const { width, height, luma } = scanScene();
+  const header = Buffer.from(`YUV4MPEG2 W${width} H${height} F15:1 Ip A1:1 C420jpeg\nFRAME\n`);
+  const chroma = Buffer.alloc((width / 2) * (height / 2) * 2, 128);
+  return Buffer.concat([header, Buffer.from(luma), chroma]);
+}
+
+/** The scene as a PNG photo. */
+export function scanPhoto(width = 640, height = 480) {
+  const { luma } = scanScene(width, height);
+  const pixmap = new mupdf.Pixmap(mupdf.ColorSpace.DeviceRGB, [0, 0, width, height], false);
+  const pixels = pixmap.getPixels();
+  for (let index = 0; index < luma.length; index += 1) pixels[index * 3] = pixels[index * 3 + 1] = pixels[index * 3 + 2] = luma[index]!;
+  return Buffer.from(pixmap.asPNG());
 }
