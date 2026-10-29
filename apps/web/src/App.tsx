@@ -74,6 +74,7 @@ import {
   ScanText,
   Search,
   SendToBack,
+  Sparkles,
   Shapes,
   ShieldCheck,
   Signature,
@@ -131,6 +132,7 @@ import { findParagraph, reflowWidth } from "./paragraphs";
 import { createZip, describeGroup, parseRanges, splitEvery } from "./split";
 import { ScanSession, type ScanResult } from "./scan/ScanSession";
 import { AutoScrollBar, ReadAloudBar } from "./ReadingBar";
+import { AiAssistant } from "./AiAssistant";
 import { sentencesOf, type Box, type Sentence } from "./readAloud";
 import { PAGE_SIZES, mapCrop, mapOverlay, mmToPoints, pointsToMm, presetOf, targetSize, type Orientation, type PageSizePreset } from "./pageSize";
 
@@ -241,7 +243,7 @@ export function App() {
   const [open, setOpen] = useState<OpenDoc | null>(null);
   const [tab, setTab] = useState<TabId>("edit");
   const [dialog, setDialog] = useState<
-    null | "properties" | "forms" | "find" | "ocr" | "pages" | "layout" | "compress" | "imageCrop" | "pageImages" | "security" | "shortcuts" | "split" | "pageSize" | "convert"
+    null | "properties" | "forms" | "find" | "ocr" | "pages" | "layout" | "compress" | "imageCrop" | "pageImages" | "security" | "shortcuts" | "split" | "pageSize" | "convert" | "ai"
   >(null);
   const [convertFormat, setConvertFormat] = useState<"docx" | "xlsx" | "pptx" | "txt">("docx");
   const [convertScope, setConvertScope] = useState<"all" | "page" | "range">("all");
@@ -2307,10 +2309,11 @@ export function App() {
           title: "Change how pages look while reading (not the exported file)",
           active: readingTheme !== "day",
         },
-        { key: "readAloud", label: "Read aloud", Icon: Volume2, action: () => setReadingMode("speak"), title: "Read the document aloud from this page", active: readingMode === "speak" },
-        { key: "autoScroll", label: "Auto-scroll", Icon: ChevronsDown, action: () => setReadingMode("scroll"), title: "Scroll through the document hands-free", active: readingMode === "scroll" },
+        { key: "readAloud", label: "Read aloud", Icon: Volume2, action: () => { setReadingMode("speak"); setTrayOpen(false); }, title: "Read the document aloud from this page", active: readingMode === "speak" },
+        { key: "autoScroll", label: "Auto-scroll", Icon: ChevronsDown, action: () => { setReadingMode("scroll"); setTrayOpen(false); }, title: "Scroll through the document hands-free", active: readingMode === "scroll" },
         { key: "print", label: "Print", Icon: Printer, action: () => void printDocument(), title: "Print with all edits (Ctrl+P)" },
         { key: "convert", label: "Convert", Icon: ArrowLeftRight, action: () => setDialog("convert"), title: "Convert to Word, Excel, PowerPoint or text" },
+        { key: "ai", label: "AI assistant", Icon: Sparkles, action: () => setDialog("ai"), title: "Optional: summarize or translate pages with Claude, using your own API key" },
         { key: "text", label: "Export text", Icon: FileText, action: () => void exportText(), title: "Save all text as a .txt file" },
         { key: "ocr", label: "OCR scan", Icon: ScanText, action: () => { setOcrProgress(""); setDialog("ocr"); }, title: "Recognise text in scanned pages" },
         { key: "security", label: "Protect", Icon: Lock, action: () => setDialog("security"), title: "Passwords, permissions and digital signatures" },
@@ -3872,6 +3875,17 @@ export function App() {
             </>
           )}
         </Modal>
+      )}
+
+      {dialog === "ai" && (
+        <AiAssistant
+          pageCount={doc.pageOrder.length}
+          currentPage={page}
+          native={isNativePlatform}
+          textOf={async (indexes) => api().textOfBytes(await renderedExport(indexes.map((index) => doc.pageOrder[index]!)))}
+          onSave={(text, kind) => void downloadBlob(new Blob([text], { type: "text/plain" }), `${baseName(open.name)}-${kind}.txt`).then((message) => setNotice(`${message}.`))}
+          onClose={() => setDialog(null)}
+        />
       )}
 
       {dialog === "shortcuts" && (
