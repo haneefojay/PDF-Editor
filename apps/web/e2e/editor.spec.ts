@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { readFile } from "node:fs/promises";
-import { colourAt, imageOnPanelPdf, inspectPdf, longPdf, PARAGRAPH_LINES, paragraphPdf, pngImage, readStoredZip, samplePdf } from "./fixtures";
+import { colourAt, imageOnPanelPdf, inspectPdf, longPdf, PARAGRAPH_LINES, paragraphPdf, pngImage, readStoredZip, samplePdf, wordFile, excelFile, zipText } from "./fixtures";
 import { clickOnPage, dragOnPage, exportPdf, fitPage, openSample, pageAt, tab, tool } from "./helpers";
 
 test("edits original text without disturbing the table around it", async ({ page }) => {
@@ -324,4 +324,76 @@ test("the scanner offers photos when no camera can be used", async ({ page }) =>
   await expect(scanner.getByRole("button", { name: "Take photo" })).toBeDisabled();
   await scanner.getByRole("button", { name: "Close scanner" }).click();
   await expect(scanner).toBeHidden();
+});
+
+test("converts to Word, Excel and PowerPoint", async ({ page }) => {
+  await openSample(page);
+  const convert = async (format: string, scope: string, range?: string) => {
+    await tab(page, "Tools");
+    await tool(page, "Convert");
+    const dialog = page.getByRole("dialog", { name: "Convert" });
+    await dialog.getByRole("radio", { name: new RegExp(`^${format}`) }).click();
+    await dialog.getByRole("combobox", { name: /^Pages/ }).selectOption(scope);
+    if (range) await dialog.getByRole("textbox", { name: "Pages to convert" }).fill(range);
+    const download = page.waitForEvent("download", { timeout: 90_000 });
+    await dialog.getByRole("button", { name: /^Convert \d+ page/ }).click();
+    const file = await download;
+    await expect(dialog).toBeHidden();
+    return { name: file.suggestedFilename(), bytes: await readFile((await file.path())!) };
+  };
+
+  const word = await convert("Word", "all");
+  expect(word.name).toBe("sample.docx");
+  const document = zipText(word.bytes, "word/document.xml");
+  expect(document).toContain('<w:pStyle w:val="Heading1"/>');
+  expect(document).toContain(">Quarterly Report<");
+  expect(document).toContain("<w:tbl>");
+  expect(document).toMatch(/North<\/w:t>.*\$1,200,000<\/w:t>/);
+  expect(document.match(/<w:pageBreakBefore\/>/g)).toHaveLength(2);
+
+  const excel = await convert("Excel", "range", "1");
+  expect(excel.name).toBe("sample.xlsx");
+  expect(readStoredZip(excel.bytes).map((file) => file.name)).toContain("xl/worksheets/sheet1.xml");
+  expect(readStoredZip(excel.bytes).map((file) => file.name)).not.toContain("xl/worksheets/sheet2.xml");
+  const sheet = zipText(excel.bytes, "xl/worksheets/sheet1.xml");
+  expect(sheet).toContain("<v>1200000</v>");
+  expect(sheet).toContain(">Region<");
+
+  const slides = await convert("PowerPoint", "page");
+  expect(slides.name).toBe("sample.pptx");
+  const files = readStoredZip(slides.bytes).map((file) => file.name);
+  expect(files).toEqual(expect.arrayContaining(["ppt/slides/slide1.xml", "ppt/media/page1.png"]));
+  expect(files).not.toContain("ppt/slides/slide2.xml");
+  expect(zipText(slides.bytes, "ppt/slides/slide1.xml")).toContain(">Quarterly Report<");
+});
+
+test("opens Word and Excel files as PDFs, and inserts them into a PDF", async ({ page }) => {
+  await page.goto("/");
+  await page.setInputFiles('input[aria-label="Open PDF"]', { name: "notes.docx", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", buffer: await wordFile() });
+  await expect(page.locator(".page img").first()).toBeVisible({ timeout: 60_000 });
+  await expect(page.locator(".title, header").first()).toContainText("notes.pdf");
+  await expect(page.locator(".rail .thumb")).toHaveCount(3);
+  const word = inspectPdf(await exportPdf(page));
+  expect(word.pages.map((item) => item.size)).toEqual([[612, 792], [612, 792], [792, 612]]);
+  expect(word.pages[0]!.text).toContain("Meeting Notes");
+  expect(word.pages[0]!.text).toMatch(/1\.\s+Order the beds/);
+  expect(word.pages[0]!.text).toMatch(/2\.\s+Book the van/);
+  expect(word.pages[0]!.text).toContain("Soil delivery");
+  expect(word.pages[1]!.text).toContain("Second page text");
+  expect(word.pages[2]!.text).toContain("Landscape appendix");
+
+  // Insert a workbook after the first page.
+  await tab(page, "Pages");
+  const chooser = page.waitForEvent("filechooser");
+  await tool(page, "Insert PDF");
+  await (await chooser).setFiles({ name: "costs.xlsx", mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", buffer: await excelFile() });
+  await expect(page.locator(".rail .thumb")).toHaveCount(4);
+  const merged = inspectPdf(await exportPdf(page));
+  expect(merged.pages[1]!.text).toMatch(/Raised beds\s+\$2,400\.00\s+2-Mar-26/);
+});
+
+test("explains which files cannot be opened", async ({ page }) => {
+  await page.goto("/");
+  await page.setInputFiles('input[aria-label="Open PDF"]', { name: "deck.pptx", mimeType: "application/octet-stream", buffer: Buffer.from("x") });
+  await expect(page.getByRole("alert")).toContainText("PowerPoint files can't be opened yet");
 });

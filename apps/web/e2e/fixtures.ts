@@ -1,4 +1,5 @@
 import * as mupdf from "mupdf";
+import { inflateRawSync } from "node:zlib";
 import { homography, project } from "../src/scan/geometry";
 
 /** A small report with a heading, a table, a coloured block and a rotated page. */
@@ -131,20 +132,23 @@ export function colourAt(bytes: Buffer, x: number, y: number, page = 0) {
   return rgb;
 }
 
-/** Files in a ZIP archive written without compression. */
+/** Files in a ZIP archive, stored or deflated. */
 export function readStoredZip(bytes: Buffer) {
   const files: { name: string; data: Buffer }[] = [];
   let at = 0;
   while (bytes.readUInt32LE(at) === 0x04034b50) {
+    const method = bytes.readUInt16LE(at + 8);
     const size = bytes.readUInt32LE(at + 18);
     const nameLength = bytes.readUInt16LE(at + 26);
     const extra = bytes.readUInt16LE(at + 28);
     const start = at + 30 + nameLength + extra;
-    files.push({ name: bytes.subarray(at + 30, at + 30 + nameLength).toString("utf8"), data: bytes.subarray(start, start + size) });
+    const raw = bytes.subarray(start, start + size);
+    files.push({ name: bytes.subarray(at + 30, at + 30 + nameLength).toString("utf8"), data: method === 8 ? inflateRawSync(raw) : raw });
     at = start + size;
   }
   return files;
 }
+export const zipText = (bytes: Buffer, name: string) => readStoredZip(bytes).find((file) => file.name === name)?.data.toString("utf8") ?? "";
 
 /** Where a 300×400 page lands in a photo taken by a pinhole camera, tilted back and turned a little. */
 function photographedCorners(width: number, height: number) {
@@ -210,4 +214,49 @@ export function scanPhoto(width = 640, height = 480) {
   const pixels = pixmap.getPixels();
   for (let index = 0; index < luma.length; index += 1) pixels[index * 3] = pixels[index * 3 + 1] = pixels[index * 3 + 2] = luma[index]!;
   return Buffer.from(pixmap.asPNG());
+}
+
+const W_NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
+const RELS = '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">';
+
+/** A Word file: heading style, bullet list, a bordered table, a page break and a landscape second section. */
+export async function wordFile() {
+  const para = (text: string, props = "") => `<w:p><w:pPr>${props}</w:pPr><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p>`;
+  const cell = (text: string) => `<w:tc><w:tcPr><w:tcW w:w="2880" w:type="dxa"/></w:tcPr>${para(text)}</w:tc>`;
+  const body = [
+    para("Meeting Notes", '<w:pStyle w:val="Heading1"/>'),
+    `<w:p><w:r><w:t xml:space="preserve">We agreed the </w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>budget</w:t></w:r><w:r><w:t xml:space="preserve"> and the plan.</w:t></w:r></w:p>`,
+    para("Order the beds", '<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>'),
+    para("Book the van", '<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>'),
+    `<w:tbl><w:tblPr><w:tblBorders><w:top w:val="single" w:sz="4"/><w:left w:val="single" w:sz="4"/><w:bottom w:val="single" w:sz="4"/><w:right w:val="single" w:sz="4"/><w:insideH w:val="single" w:sz="4"/><w:insideV w:val="single" w:sz="4"/></w:tblBorders></w:tblPr><w:tblGrid><w:gridCol w:w="2880"/><w:gridCol w:w="2880"/></w:tblGrid><w:tr>${cell("Owner")}${cell("Task")}</w:tr><w:tr>${cell("Sam")}${cell("Soil delivery")}</w:tr></w:tbl>`,
+    `<w:p><w:r><w:br w:type="page"/></w:r><w:r><w:t>Second page text</w:t></w:r><w:pPr><w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:pPr></w:p>`,
+    para("Landscape appendix"),
+    `<w:sectPr><w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/><w:pgMar w:top="1080" w:right="1080" w:bottom="1080" w:left="1080"/></w:sectPr>`,
+  ].join("");
+  const { writePackage } = await import("../src/convert/ooxml");
+  const bytes = await writePackage([
+    { name: "[Content_Types].xml", data: '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>' },
+    { name: "_rels/.rels", data: `${RELS}<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>` },
+    { name: "word/_rels/document.xml.rels", data: `${RELS}<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/></Relationships>` },
+    { name: "word/document.xml", data: `<?xml version="1.0" encoding="UTF-8"?><w:document ${W_NS}><w:body>${body}</w:body></w:document>` },
+    { name: "word/styles.xml", data: `<?xml version="1.0" encoding="UTF-8"?><w:styles ${W_NS}><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="22"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:pPr><w:spacing w:after="160"/></w:pPr></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:rPr><w:b/><w:color w:val="2F5496"/><w:sz w:val="36"/></w:rPr></w:style></w:styles>` },
+    { name: "word/numbering.xml", data: `<?xml version="1.0" encoding="UTF-8"?><w:numbering ${W_NS}><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>` },
+  ]);
+  return Buffer.from(bytes);
+}
+
+/** An Excel workbook with a currency column and a date. */
+export async function excelFile() {
+  const { writePackage } = await import("../src/convert/ooxml");
+  const sheet = `<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr" s="1"><is><t>Item</t></is></c><c r="B1" t="inlineStr" s="1"><is><t>Cost</t></is></c><c r="C1" t="inlineStr" s="1"><is><t>Due</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>Raised beds</t></is></c><c r="B2" s="2"><v>2400</v></c><c r="C2" s="3"><v>46083</v></c></row></sheetData></worksheet>`;
+  const styles = `<?xml version="1.0" encoding="UTF-8"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="1"><numFmt numFmtId="164" formatCode="&quot;$&quot;#,##0.00"/></numFmts><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border/></borders><cellXfs count="4"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0"/><xf numFmtId="164" fontId="0" fillId="0" borderId="0"/><xf numFmtId="15" fontId="0" fillId="0" borderId="0"/></cellXfs></styleSheet>`;
+  const bytes = await writePackage([
+    { name: "[Content_Types].xml", data: '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/></Types>' },
+    { name: "_rels/.rels", data: `${RELS}<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>` },
+    { name: "xl/workbook.xml", data: '<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Costs" sheetId="1" r:id="rId1"/></sheets></workbook>' },
+    { name: "xl/_rels/workbook.xml.rels", data: `${RELS}<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>` },
+    { name: "xl/worksheets/sheet1.xml", data: sheet },
+    { name: "xl/styles.xml", data: styles },
+  ]);
+  return Buffer.from(bytes);
 }

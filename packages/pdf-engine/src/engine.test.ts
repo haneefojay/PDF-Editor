@@ -637,3 +637,91 @@ describe("copying pages with annotations", () => {
     expect(inspect(imported.bytes, 1)).toEqual({ notes: ["Look here"], widgets: ["Ada"], fieldCount: 1 });
   });
 });
+
+describe("page analysis for conversion", () => {
+  const reportPdf = () => {
+    const doc = new mupdf.PDFDocument();
+    const resources = doc.newDictionary();
+    const fonts = doc.newDictionary();
+    fonts.put("F1", doc.addSimpleFont(new mupdf.Font("Helvetica")));
+    fonts.put("F2", doc.addSimpleFont(new mupdf.Font("Helvetica-Bold")));
+    fonts.put("F3", doc.addSimpleFont(new mupdf.Font("Times-Italic")));
+    resources.put("Font", fonts);
+    const pixmap = new mupdf.Pixmap(mupdf.ColorSpace.DeviceRGB, [0, 0, 300, 200], false);
+    pixmap.clear(90);
+    const xobjects = doc.newDictionary();
+    xobjects.put("Im1", doc.addImage(new mupdf.Image(pixmap)));
+    resources.put("XObject", xobjects);
+    const body = [
+      "BT /F2 24 Tf 72 720 Td (Annual Report) Tj ET",
+      "BT /F1 11 Tf 72 690 Td (Sales rose in every region.) Tj /F3 11 Tf ( Truly) Tj ET",
+      "BT /F1 11 Tf 72 676 Td (The second line of the paragraph.) Tj ET",
+      "0 0 0 RG 1 w 72 600 m 400 600 l S 72 575 m 400 575 l S 72 550 m 400 550 l S 72 550 m 72 600 l S 236 550 m 236 600 l S 400 550 m 400 600 l S",
+      "BT /F2 11 Tf 80 582 Td (Region) Tj ET BT /F2 11 Tf 244 582 Td (Revenue) Tj ET",
+      "BT /F1 11 Tf 80 557 Td (North) Tj ET BT /F1 11 Tf 244 557 Td (1,200) Tj ET",
+      "q 150 0 0 100 72 400 cm /Im1 Do Q",
+      "1 0 0 rg BT /F1 9 Tf 72 380 Td (Figure 1) Tj ET",
+    ].join("\n");
+    doc.insertPage(-1, doc.addPage([0, 0, 612, 792], 0, resources, body));
+    const bytes = new Uint8Array(doc.saveToBuffer("").asUint8Array()).buffer;
+    doc.destroy();
+    return bytes;
+  };
+
+  it("reports styled spans, images, rules and table grids in points", async () => {
+    const engine = createEngine(mupdf);
+    const [page] = await engine.analyzeBytes(reportPdf());
+    expect(page!.width).toBe(612);
+    const heading = page!.spans.find((span) => span.text === "Annual Report")!;
+    expect(heading).toMatchObject({ size: 24, bold: true, serif: false });
+    expect(heading.baseline).toBeCloseTo(792 - 720, 0);
+    const italic = page!.spans.find((span) => span.text.includes("Truly"))!;
+    expect(italic).toMatchObject({ italic: true, serif: true });
+    expect(page!.spans.find((span) => span.text === "Figure 1")!.color).toBe("#ff0000");
+    // Words on one line keep their spaces; the two lines of the paragraph share a block.
+    const first = page!.spans.find((span) => span.text.startsWith("Sales"))!;
+    expect(first.text).toBe("Sales rose in every region.");
+    expect(page!.spans.find((span) => span.text.startsWith("The second"))!.block).toBe(first.block);
+
+    expect(page!.images).toHaveLength(1);
+    expect(page!.images[0]).toMatchObject({ x: 72, width: 150, height: 100, mimeType: "image/jpeg" });
+    expect(page!.images[0]!.y).toBeCloseTo(792 - 500, 0);
+
+    const table = page!.tables.find((item) => item.ruled)!;
+    [72, 236, 400].forEach((x, index) => expect(Math.abs(table.columns[index]! - x)).toBeLessThan(1));
+    [192, 217, 242].forEach((y, index) => expect(Math.abs(table.rows[index]! - y)).toBeLessThan(1));
+    expect(page!.rects.filter((rect) => rect.stroked).length).toBeGreaterThanOrEqual(6);
+  });
+
+  it("renders a page without its text", async () => {
+    const engine = createEngine(mupdf);
+    const png = await engine.renderBytesWithoutText(reportPdf(), 0, 1);
+    const image = new mupdf.Image(png);
+    const pixels = image.toPixmap();
+    // The heading area is blank; the table rule is still there.
+    const at = (x: number, y: number) => pixels.getPixels()[(y * pixels.getWidth() + x) * pixels.getNumberOfComponents()]!;
+    let dark = 0;
+    for (let x = 72; x < 230; x += 1) for (let y = 55; y < 75; y += 1) if (at(x, y) < 128) dark += 1;
+    expect(dark).toBe(0);
+    expect(Math.min(at(150, 191), at(150, 192), at(150, 193))).toBeLessThan(160);
+  });
+});
+
+describe("HTML layout", () => {
+  it("lays out parts on pages of their own size", async () => {
+    const engine = createEngine(mupdf);
+    const long = `<p>${"Many words to fill the page. ".repeat(400)}</p>`;
+    const bytes = await engine.htmlToPdf([
+      { html: `<html><head><style>@page{margin:72pt}</style></head><body><h1>Title</h1>${long}</body></html>`, width: 612, height: 792 },
+      { html: "<html><body><p>Wide part</p></body></html>", width: 792, height: 612 },
+    ]);
+    const doc = mupdf.Document.openDocument(bytes, "application/pdf");
+    const count = doc.countPages();
+    expect(count).toBeGreaterThan(2);
+    expect(doc.loadPage(0).getBounds()).toEqual([0, 0, 612, 792]);
+    expect(doc.loadPage(count - 1).getBounds()).toEqual([0, 0, 792, 612]);
+    expect(doc.loadPage(count - 1).toStructuredText("").asText()).toContain("Wide part");
+    expect(doc.loadPage(0).toStructuredText("").asText()).toContain("Title");
+    doc.destroy();
+  });
+});

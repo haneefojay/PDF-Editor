@@ -62,6 +62,36 @@ export type PositionedTextLine = {
   fitMode: "auto" | "shrink" | "overflow";
 };
 
+/**
+ * Page content for conversion to other formats, in points from the top-left
+ * of the displayed page.
+ */
+export type LayoutSpan = {
+  text: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  baseline: number;
+  size: number;
+  color: string;
+  fontName: string;
+  fontFamily: string;
+  bold: boolean;
+  italic: boolean;
+  serif: boolean;
+  monospace: boolean;
+  /** Text block and line within the page, in reading order. */
+  block: number;
+  line: number;
+};
+export type LayoutImage = { x: number; y: number; width: number; height: number; mimeType: "image/png" | "image/jpeg"; data: Uint8Array };
+/** Filled or stroked rectangles: table rules, cell shading, underlines. */
+export type LayoutRect = { x: number; y: number; width: number; height: number; color: string; stroked: boolean };
+/** A table grid: column and row boundaries in points. */
+export type LayoutTable = { columns: number[]; rows: number[]; ruled: boolean };
+export type PageLayout = { width: number; height: number; spans: LayoutSpan[]; images: LayoutImage[]; rects: LayoutRect[]; tables: LayoutTable[] };
+
 export type OutlineEntry = {
   title: string;
   /** Target page index, or null when the entry has no destination in this file. */
@@ -180,6 +210,15 @@ export interface PdfWorkerApi {
   appendPages(operation: AppendOperation): Promise<AppendResult>;
   /** Builds a new PDF with one page per image (PNG or JPEG), fitted to A4. */
   createFromImages(images: ArrayBuffer[], pageSize?: ImagePageSize): Promise<Uint8Array>;
+  /** Text, images, shapes and tables of the given pages of a PDF, for conversion. */
+  analyzeBytes(bytes: ArrayBuffer, pages?: number[]): Promise<PageLayout[]>;
+  /**
+   * Lays out HTML documents into PDF pages, one part after another; each part
+   * starts on a new page of its own size (in points).
+   */
+  htmlToPdf(parts: { html: string; width: number; height: number }[]): Promise<Uint8Array>;
+  /** A page rendered as PNG with its text removed, for slide backgrounds. */
+  renderBytesWithoutText(bytes: ArrayBuffer, index: number, scale: number): Promise<Uint8Array>;
   /** Renders a page of another PDF (such as an export) without opening it. */
   renderBytes(bytes: Uint8Array, index: number, scale: number): Promise<Uint8Array>;
   /** Plain text of every page of another PDF, one string per page. */
