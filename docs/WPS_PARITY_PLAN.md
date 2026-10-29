@@ -15,7 +15,7 @@ WPS Office's PDF tool sets the bar this plan aims for. It covers reading, editin
 | Pages | Merge, split, insert, extract, rotate, crop, resize | Done (M2) | — |
 | Protect | Encrypt, permissions, redact | Done | — |
 | Convert | PDF ↔ Word/Excel/PPT, images, text | Images ↔ PDF, text | Large: Word/Excel/PPT |
-| Scan | Camera capture, edge detection, perspective fix, OCR | OCR on existing pages | Large on mobile |
+| Scan | Camera capture, edge detection, perspective fix, OCR | Done (M3) | — |
 | Extras | AI summary/translate, cloud sync | — | Optional; must respect local-first |
 
 ## Milestones
@@ -39,10 +39,11 @@ WPS Office's PDF tool sets the bar this plan aims for. It covers reading, editin
 - Split a document into files by page ranges or every N pages, and change page size.
 - Also fixed along the way: copied pages (duplicate, insert PDF, resize) keep their annotations and form fields, and exports keep the document's form, language and viewer settings.
 
-### M3. Scan to PDF (mobile)
+### M3. Scan to PDF (mobile) (done)
 - Camera capture with automatic edge detection.
 - Perspective correction and enhancement filters.
 - Multi-page scan sessions, with OCR straight into searchable PDFs.
+- How it works: the page is the large, high-contrast, nearly four-sided region in a downscaled frame; its corners come from the convex hull. The true page proportions are recovered from the perspective (Zhang and He's whiteboard method), and the Document filter divides by an estimate of the paper brightness to remove shadows. Everything runs on the device.
 
 ### M4. Conversion
 - PDF → DOCX locally, using reading-order text, styles and images.

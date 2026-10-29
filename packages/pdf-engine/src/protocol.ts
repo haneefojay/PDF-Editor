@@ -123,9 +123,16 @@ export type DocumentInfo = {
   signatures: SignatureStatus[];
 };
 
+/**
+ * Page size for image pages: a sheet the image is fitted into (keeping the
+ * image's orientation), or "fit" for a page shaped like the image whose long
+ * edge matches A4.
+ */
+export type ImagePageSize = "a4" | "letter" | "fit";
+
 export type AppendOperation =
   | { type: "blank"; width: number; height: number }
-  | { type: "images"; images: ArrayBuffer[] }
+  | { type: "images"; images: ArrayBuffer[]; pageSize?: ImagePageSize }
   | { type: "copy"; source: number }
   /** Copies of pages fitted (scaled and centred) to a new display size in points. */
   | { type: "resize"; sources: number[]; width: number; height: number }
@@ -172,7 +179,7 @@ export interface PdfWorkerApi {
    */
   appendPages(operation: AppendOperation): Promise<AppendResult>;
   /** Builds a new PDF with one page per image (PNG or JPEG), fitted to A4. */
-  createFromImages(images: ArrayBuffer[]): Promise<Uint8Array>;
+  createFromImages(images: ArrayBuffer[], pageSize?: ImagePageSize): Promise<Uint8Array>;
   /** Renders a page of another PDF (such as an export) without opening it. */
   renderBytes(bytes: Uint8Array, index: number, scale: number): Promise<Uint8Array>;
   /** Plain text of every page of another PDF, one string per page. */

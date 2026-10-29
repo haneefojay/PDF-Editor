@@ -11,6 +11,7 @@ import { redactMode, type RedactMode } from "@paperless/editor-core";
 import type {
   AppendOperation,
   DocumentInfo,
+  ImagePageSize,
   ExportOverlay,
   ExportRequest,
   FormField,
@@ -1535,7 +1536,7 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
   };
 
   /** Adds one page per image, sized to A4 in the image's orientation. */
-  const addImagePages = (target: Mupdf.PDFDocument, images: ArrayBuffer[]) => {
+  const addImagePages = (target: Mupdf.PDFDocument, images: ArrayBuffer[], pageSize: ImagePageSize = "a4") => {
     for (const data of images) {
       let image: Mupdf.Image;
       try {
@@ -1544,7 +1545,10 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
         throw new Error("One of the images could not be read. Use PNG or JPEG files.");
       }
       const landscape = image.getWidth() > image.getHeight();
-      const [pageWidth, pageHeight] = landscape ? [842, 595] : [595, 842];
+      const [short, long] = pageSize === "letter" ? [612, 792] : [595.28, 841.89];
+      const fit = 841.89 / Math.max(image.getWidth(), image.getHeight());
+      const [pageWidth, pageHeight] =
+        pageSize === "fit" ? [image.getWidth() * fit, image.getHeight() * fit] : landscape ? [long, short] : [short, long];
       const scale = Math.min(pageWidth / image.getWidth(), pageHeight / image.getHeight());
       const width = image.getWidth() * scale;
       const height = image.getHeight() * scale;
@@ -1805,7 +1809,7 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
       const firstIndex = target.countPages();
       try {
         const mappings: PageMapping[] = [];
-        if (operation.type === "images") addImagePages(target, operation.images);
+        if (operation.type === "images") addImagePages(target, operation.images, operation.pageSize);
         else if (operation.type === "resize") {
           const source = open(sourceBytes!, password);
           const map = target.newGraftMap();
@@ -1857,11 +1861,11 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
       }
     },
 
-    async createFromImages(images) {
+    async createFromImages(images, pageSize) {
       if (!images.length) throw new Error("Choose at least one image.");
       const target = new mupdf.PDFDocument();
       try {
-        addImagePages(target, images);
+        addImagePages(target, images, pageSize);
         return copyBytes(target.saveToBuffer("garbage=3,compress=yes").asUint8Array());
       } finally {
         target.destroy();

@@ -17,6 +17,12 @@ A local-first, privacy-first PDF editor for the web and Android, licensed under 
 - Find & replace across the whole document.
 - Secure redaction that removes content, not just covers it.
 
+**Scan**
+- Scan paper with the camera: the page is outlined live, then straightened with its real proportions, even when photographed at an angle.
+- Adjust the corners with a magnifier, pick a filter (Document, Auto colour, Original, Grayscale, B&W) and rotate.
+- Scan several pages in one go, reorder or retake them, then create a PDF or insert them into the open one. Photos from the gallery work too.
+- Optional on-device OCR makes the scan searchable straight away.
+
 **Comment & review**
 - Highlight, underline, strikeout and squiggly markup that snaps to text lines.
 - Sticky notes, text callouts, stamps, measurements and file attachments.
@@ -65,6 +71,7 @@ The unit tests in `packages/pdf-engine` build real PDFs with MuPDF and inspect w
   - `DocumentView.tsx`: continuous, virtualized page column
   - `PageCanvas.tsx`: page interaction
   - `textMetrics.ts`: font-accurate text preview
+  - `scan/`: page detection, perspective correction and filters, plus the scanner screen
   - `layout.ts`: generated headers and footers
 - `packages/editor-core`: serializable document model, undoable commands, and the text layout shared by the editor and the exporter
 - `packages/pdf-engine`: MuPDF in a Web Worker
@@ -85,4 +92,4 @@ pnpm android:apk       # also create a debug APK
 
 The debug APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`. GitHub Actions runs the same build and uploads `paperless-pdf-editor-debug-apk` as an artifact. Release signing requires a private keystore supplied through CI secrets; no signing keys belong in this repository.
 
-On Android, PDFs are selected through the system file chooser. Exports, images and text files are written to the app cache and handed to Android's system save/share sheet, which also offers printing. No broad storage permission is requested.
+On Android, PDFs are selected through the system file chooser. The scanner asks for camera access the first time it opens; the camera is optional, and photos can be imported instead. Exports, images and text files are written to the app cache and handed to Android's system save/share sheet, which also offers printing. No broad storage permission is requested.
