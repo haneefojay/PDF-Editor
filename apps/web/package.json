@@ -12,6 +12,7 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^1.3.0",
     "@capacitor-community/text-to-speech": "6.1.0",
     "@capacitor/app": "^7.1.2",
     "@capacitor/core": "^7.6.9",

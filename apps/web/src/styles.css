@@ -2701,9 +2701,23 @@ span.scanIcon {
 }
 .app.phone .readingBar {
   bottom: calc(76px + env(safe-area-inset-bottom));
-  border-radius: 16px;
-  flex-wrap: wrap;
-  justify-content: center;
+  width: calc(100vw - 24px);
+  gap: 2px;
+}
+.app.phone .readingStatus {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+}
+.app.phone .readingSpeed {
+  flex: 1;
+  min-width: 0;
+}
+.app.phone .readingSpeed > span {
+  display: none;
+}
+.app.phone .readingSpeed input {
+  width: 100%;
 }
 .app.phone .readingBar .voiceSelect {
   display: none;
@@ -2777,4 +2791,54 @@ span.scanIcon {
   margin-right: 6px;
   border-radius: 2px;
   vertical-align: 0;
+}
+
+/* AI assistant */
+.aiNote {
+  margin: 10px 0 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+.aiAdvanced {
+  margin: 10px 0;
+  font-size: 13px;
+}
+.aiAdvanced summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+.aiAdvanced label {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+}
+.aiResult {
+  margin-top: 12px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+.aiStatus {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.aiOutput {
+  max-height: 46vh;
+  overflow: auto;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--raised);
+  white-space: pre-wrap;
+  line-height: 1.5;
+  font-size: 14px;
+}
+.aiActions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
 }

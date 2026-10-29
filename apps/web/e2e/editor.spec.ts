@@ -531,3 +531,86 @@ test("lists the annotations already in the file and jumps to them", async ({ pag
   await expect(pageAt(page, 2)).toBeInViewport();
   await expect(pageAt(page, 2).locator(".searchHighlight")).toHaveCount(1);
 });
+
+/** Answers Messages API calls with a streamed reply, recording each request. */
+async function mockClaude(page: import("@playwright/test").Page, reply: (body: { messages: { content: string }[] }) => string, status = 200) {
+  const requests: { headers: Record<string, string>; body: Record<string, unknown> }[] = [];
+  await page.route("https://api.anthropic.com/**", async (route) => {
+    const request = route.request();
+    const cors = { "access-control-allow-origin": "*", "access-control-allow-headers": "*", "access-control-allow-methods": "POST, OPTIONS" };
+    if (request.method() === "OPTIONS") return route.fulfill({ status: 204, headers: cors });
+    const body = request.postDataJSON() as { messages: { content: string }[] };
+    requests.push({ headers: await request.allHeaders(), body });
+    if (status !== 200)
+      return route.fulfill({ status, headers: { ...cors, "content-type": "application/json" }, body: JSON.stringify({ type: "error", error: { type: "authentication_error", message: "invalid x-api-key" } }) });
+    const text = reply(body);
+    const events = [
+      ["message_start", { type: "message_start", message: { id: "msg_test", type: "message", role: "assistant", model: "claude-opus-5-5", content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 1 } } }],
+      ["content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }],
+      ...text.split(/(?<= )/).map((part) => ["content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: part } }]),
+      ["content_block_stop", { type: "content_block_stop", index: 0 }],
+      ["message_delta", { type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 5 } }],
+      ["message_stop", { type: "message_stop" }],
+    ];
+    await route.fulfill({ status: 200, headers: { ...cors, "content-type": "text/event-stream" }, body: events.map(([name, data]) => `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`).join("") });
+  });
+  return requests;
+}
+
+test("AI assistant is off until set up, then summarizes and translates with the user's key", async ({ page }) => {
+  const requests = await mockClaude(page, (body) => (body.messages[0]!.content.includes("Quarterly Report") ? "The board report shows steady revenue growth." : "Página traducida."));
+  await openSample(page);
+  await tab(page, "Tools");
+  await tool(page, "AI assistant");
+  const setup = page.getByRole("dialog", { name: "Set up the AI assistant" });
+  const turnOn = setup.getByRole("button", { name: "Turn on" });
+  await expect(turnOn).toBeDisabled();
+  await setup.getByLabel("Anthropic API key").fill("sk-ant-test-key");
+  await expect(turnOn).toBeDisabled();
+  await setup.getByRole("checkbox", { name: /I understand/ }).check();
+  await turnOn.click();
+  expect(requests).toHaveLength(0);
+
+  const assistant = page.getByRole("dialog", { name: "AI assistant" });
+  await expect(assistant).toContainText("api.anthropic.com");
+  await assistant.getByRole("button", { name: "Send 1 page" }).click();
+  await expect(assistant.locator(".aiOutput")).toHaveText("The board report shows steady revenue growth.");
+  await expect(assistant.getByRole("status")).toHaveText(/Done/);
+  expect(requests).toHaveLength(1);
+  const [summary] = requests;
+  // The SDK sends the key as a bearer token.
+  expect(summary!.headers["authorization"]).toBe("Bearer sk-ant-test-key");
+  expect(summary!.headers["anthropic-dangerous-direct-browser-access"]).toBe("true");
+  expect(summary!.headers["anthropic-beta"]).toContain("server-side-fallback-2026-07-01");
+  expect(summary!.body).toMatchObject({ model: "claude-opus-5-5", fallbacks: "default", stream: true });
+  expect(summary!.body.messages).toEqual([{ role: "user", content: expect.stringContaining("Quarterly Report") }]);
+
+  // Translation goes page by page.
+  await assistant.getByRole("radio", { name: "Translate" }).click();
+  await assistant.getByRole("combobox", { name: /^Into/ }).selectOption("Spanish");
+  await assistant.getByRole("combobox", { name: /^Pages/ }).selectOption("range");
+  await assistant.getByRole("textbox", { name: "Pages to send" }).fill("2-3");
+  await assistant.getByRole("button", { name: "Send 2 pages" }).click();
+  await expect(assistant.locator(".aiOutput")).toHaveText("Page 2\nPágina traducida.\n\nPage 3\nPágina traducida.");
+  expect(requests).toHaveLength(3);
+  expect(String(requests[1]!.body.system)).toContain("into Spanish");
+  expect(requests[1]!.body.messages).toEqual([{ role: "user", content: expect.stringContaining("Page two") }]);
+});
+
+test("AI assistant explains a rejected key and can be turned off", async ({ page }) => {
+  const requests = await mockClaude(page, () => "", 401);
+  await openSample(page);
+  await tab(page, "Tools");
+  await tool(page, "AI assistant");
+  const setup = page.getByRole("dialog", { name: "Set up the AI assistant" });
+  await setup.getByLabel("Anthropic API key").fill("sk-ant-wrong");
+  await setup.getByRole("checkbox", { name: /I understand/ }).check();
+  await setup.getByRole("button", { name: "Turn on" }).click();
+  const assistant = page.getByRole("dialog", { name: "AI assistant" });
+  await assistant.getByRole("button", { name: "Send 1 page" }).click();
+  await expect(assistant.getByRole("status")).toContainText("The API key was not accepted");
+  expect(requests.length).toBeGreaterThan(0);
+  await assistant.getByRole("button", { name: "AI settings" }).click();
+  await page.getByRole("button", { name: "Turn off and forget key" }).click();
+  await expect(page.getByLabel("Anthropic API key")).toHaveValue("");
+});

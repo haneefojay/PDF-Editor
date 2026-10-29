@@ -52,10 +52,11 @@ WPS Office's PDF tool sets the bar this plan aims for. It covers reading, editin
 - How it works: the engine reports each page's styled text runs, images, ruled shapes and table grids. A shared structure pass (`apps/web/src/convert/structure.ts`) builds lines, paragraphs, headings, lists, tables (from ruling lines) and reading order, including two-column text. Small OOXML writers produce the files. Word and Excel files are read into HTML and laid out into pages by MuPDF's HTML engine.
 - Not covered yet: PowerPoint → PDF; legacy .doc/.xls/.ppt; Word headers, footers and footnotes; floating text boxes; Excel formulas that have no saved result; charts.
 
-### M5. Reading extras
+### M5. Reading extras (done)
 - Read aloud with the system speech engine, and auto-scroll.
 - Edit bookmarks and keep an annotation list.
 - Optional AI summary and translation, only with explicit consent and a user-provided endpoint, never on by default.
+- How it works: read aloud splits each page's text lines into sentences (dehyphenated, with redacted text left out and added text included) and speaks them one at a time, through the Web Speech API in browsers and the native speech engine on Android. Bookmarks are written into the exported PDF's outline. File annotations are listed from MuPDF, with the text under highlights. The AI assistant uses the Anthropic SDK in the browser with the user's own key and an optional API address; it is web only, because the Android app has no internet permission by design.
 
 ### M6. Scale and polish
 - Fast on 1,000-page documents, with memory caps for rendered pages.
