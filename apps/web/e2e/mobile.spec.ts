@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { longPdf, samplePdf } from "./fixtures";
-import { openSample, pageAt } from "./helpers";
+import { expectAccessible, openSample, pageAt } from "./helpers";
 
 const bottomTab = (page: import("@playwright/test").Page, name: string) => page.locator(".bottomNav").getByRole("tab", { name });
 
@@ -82,4 +82,15 @@ test("read aloud on a phone closes the tray and fits on one row", async ({ page 
   expect(box.x + box.width).toBeLessThanOrEqual(page.viewportSize()!.width);
   await bar.getByRole("button", { name: "Close read aloud" }).tap();
   await expect(bar).toHaveCount(0);
+});
+
+test("the phone layout passes an accessibility audit", async ({ page }) => {
+  await openSample(page, longPdf(), "long.pdf");
+  await expectAccessible(page, "phone editor");
+  for (const name of ["Edit", "Comment", "Pages", "Tools"]) {
+    await bottomTab(page, name).tap();
+    await expectAccessible(page, `phone ${name}`);
+  }
+  await page.getByRole("button", { name: "Show pages", exact: true }).tap();
+  await expectAccessible(page, "phone pages panel");
 });

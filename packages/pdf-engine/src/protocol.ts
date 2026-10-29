@@ -219,6 +219,8 @@ export interface PdfWorkerApi {
   renderPage(index: number, scale: number): Promise<Uint8Array>;
   extractText(index: number): Promise<string>;
   extractTextLines(index: number): Promise<PositionedTextLine[]>;
+  /** Lines containing some text, on every page of the document, in one call. */
+  findText(needle: string, matchCase: boolean): Promise<{ page: number; lines: PositionedTextLine[] }[]>;
   extractPageImages(index: number): Promise<PageImage[]>;
   /** Image positions on a page, without decoding the pixels. */
   listPageImages(index: number): Promise<Omit<PageImage, "dataUrl">[]>;

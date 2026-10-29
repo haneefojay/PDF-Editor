@@ -294,6 +294,9 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
       );
 
   let doc: Mupdf.PDFDocument | null = null;
+  // Text of each page's lines, kept after a search so the next one can skip
+  // pages that cannot match. A few kilobytes per page.
+  let searchText = new Map<number, string>();
   let sourceBytes: Uint8Array | null = null;
   let password: string | undefined;
 
@@ -430,6 +433,7 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
     doc?.destroy();
     doc = opened;
     sourceBytes = bytes;
+    searchText = new Map();
     password = secret;
     return describe(opened, bytes, Boolean(secret));
   };
@@ -1750,7 +1754,7 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
     }
   };
 
-  return {
+  const api: PdfWorkerApi = {
     async loadDocument(bytes, secret) {
       const copy = copyBytes(new Uint8Array(bytes));
       return loadInto(copy, secret || undefined);
@@ -2213,11 +2217,30 @@ export function createEngine(mupdf: MupdfModule): PdfWorkerApi {
       }
     },
 
+    async findText(needle, matchCase) {
+      const pageCount = requireDoc().countPages();
+      const wanted = matchCase ? needle : needle.toLocaleLowerCase();
+      const contains = (text: string) => (matchCase ? text : text.toLocaleLowerCase()).includes(wanted);
+      const found: { page: number; lines: PositionedTextLine[] }[] = [];
+      if (!wanted) return found;
+      for (let index = 0; index < pageCount; index += 1) {
+        const known = searchText.get(index);
+        if (known !== undefined && !contains(known)) continue;
+        const lines = await api.extractTextLines(index);
+        searchText.set(index, lines.map((line) => line.text).join("\n"));
+        const matching = lines.filter((line) => contains(line.text));
+        if (matching.length) found.push({ page: index, lines: matching });
+      }
+      return found;
+    },
+
     async destroy() {
       doc?.destroy();
       doc = null;
       sourceBytes = null;
       password = undefined;
+      searchText = new Map();
     },
   };
+  return api;
 }

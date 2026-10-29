@@ -59,6 +59,8 @@ A local-first, privacy-first PDF editor for the web and Android, licensed under 
 - Autosave to device storage with recent projects and crash recovery.
 - Full undo/redo, keyboard shortcuts (press `?`), pinch, double-tap and Ctrl+scroll zoom, fit width/page, dark mode.
 - A phone layout with a bottom toolbar, tool trays and options in reach of your thumb; a desktop layout with tabbed tool groups. Installable as an app.
+- Built for long documents: a 1,000-page PDF opens in under a second on a desktop and in about two seconds on a slow phone, and memory stays flat however far you scroll, because only the pages and thumbnails near the screen exist and rendered pages are kept within a pixel budget that shrinks on low-memory phones.
+- Accessible: tested against WCAG 2.1 AA with axe on desktop and phone, in light and dark themes; dialogs keep keyboard focus inside and hide the editor behind them from screen readers.
 
 Every export is re-opened and rendered before it is handed to you; a document that fails validation is never saved.
 
@@ -79,7 +81,9 @@ The unit tests in `packages/pdf-engine` build real PDFs with MuPDF and inspect w
 
 - `apps/web`: React/Vite editor
   - `App.tsx`: document state, tools and dialogs
-  - `DocumentView.tsx`: continuous, virtualized page column
+  - `DocumentView.tsx`: continuous page column; positions come from page sizes, so only pages near the screen are in the DOM
+  - `thumbnails.tsx`: the capped thumbnail cache and windowed thumbnail lists
+  - `device.ts`: memory budgets for rendered pages on low-memory phones
   - `PageCanvas.tsx`: page interaction
   - `readAloud.ts`, `ReadingBar.tsx`: sentence splitting, the speech adapter (browser or Android), read-aloud and auto-scroll controls
   - `ai.ts`, `AiAssistant.tsx`: the optional AI assistant

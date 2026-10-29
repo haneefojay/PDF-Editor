@@ -1,3 +1,4 @@
+import AxeBuilder from "@axe-core/playwright";
 import { expect, type Page } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { samplePdf } from "./fixtures";
@@ -6,6 +7,14 @@ export async function openSample(page: Page, buffer = samplePdf(), name = "sampl
   await page.goto("/");
   await page.setInputFiles('input[aria-label="Open PDF"]', { name, mimeType: "application/pdf", buffer });
   await expect(page.locator(".page img").first()).toBeVisible({ timeout: 60_000 });
+}
+
+/** WCAG 2.1 A and AA, plus axe best practices, with no exceptions. */
+export async function expectAccessible(page: Page, where: string) {
+  const { violations } = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "best-practice"]).analyze();
+  expect(
+    violations.map((violation) => `${where}: ${violation.id} (${violation.nodes.map((node) => node.target.join(" ")).slice(0, 3).join(", ")})`),
+  ).toEqual([]);
 }
 
 export const tab = (page: Page, name: string) => page.getByRole("tab", { name }).click();

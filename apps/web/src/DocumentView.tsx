@@ -1,10 +1,14 @@
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState, type ReactNode } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { PageInfo } from "@paperless/pdf-engine";
+import { PAGE_CACHE_SIZE } from "./device";
 
-/** Pages kept rendered around the viewport, and the most kept in memory. */
+/** Pages kept rendered beyond those in view. */
 const RENDER_AHEAD = 1;
-const MAX_CACHED = 14;
 const GAP = 16;
+/** How far beyond the viewport a page counts as near, in pixels. */
+const MARGIN = 300;
+
+type Range = { first: number; last: number };
 
 export type DocumentViewHandle = {
   /** Scrolls a page (by display index) into view, optionally at a normalized offset. */
@@ -36,17 +40,18 @@ export const DocumentView = forwardRef<
   }
 >(function DocumentView(props, ref) {
   const { stage, pageOrder, pages, rotations, zoom, renderScale, documentKey, page, onPageChange, onVisibleChange } = props;
-  const slots = useRef(new Map<number, HTMLDivElement>());
-  const [visible, setVisible] = useState<Set<number>>(() => new Set([page]));
+  const column = useRef<HTMLDivElement>(null);
+  // Pages near the viewport (display indexes, inclusive). Only these are in the DOM.
+  const [visible, setVisible] = useState<Range>(() => ({ first: page, last: page }));
   const [images, setImages] = useState<Map<number, Rendered>>(new Map());
   const reported = useRef(page);
   // Pages are centred in the visible width, not in the widest page's width.
   const [viewportWidth, setViewportWidth] = useState(0);
   useEffect(() => {
     if (!stage) return;
-    const column = stage.querySelector<HTMLElement>(".pageColumn")?.parentElement;
+    const parent = column.current?.parentElement;
     const measure = () => {
-      const style = column ? getComputedStyle(column) : null;
+      const style = parent ? getComputedStyle(parent) : null;
       const padding = style ? parseFloat(style.paddingLeft) + parseFloat(style.paddingRight) : 0;
       setViewportWidth(Math.max(0, stage.clientWidth - padding));
     };
@@ -59,22 +64,52 @@ export const DocumentView = forwardRef<
   const latest = useRef({ visible, images, renderScale, pageOrder, page, render: props.render });
   latest.current = { visible, images, renderScale, pageOrder, page, render: props.render };
 
-  const sizeOf = (source: number) => {
-    const info = pages[source] ?? { width: 612, height: 792 };
-    const sideways = ((((rotations[source] ?? 0) % 360) + 360) % 360) % 180 !== 0;
-    return { width: (sideways ? info.height : info.width) * zoom, height: (sideways ? info.width : info.height) * zoom };
+  // Every page's place in the column, from page sizes alone, so long
+  // documents never need a DOM node per page.
+  const layout = useMemo(() => {
+    const count = pageOrder.length;
+    const tops = new Float64Array(count + 1);
+    const widths = new Float64Array(count);
+    const heights = new Float64Array(count);
+    pageOrder.forEach((source, index) => {
+      const info = pages[source] ?? { width: 612, height: 792 };
+      const sideways = ((((rotations[source] ?? 0) % 360) + 360) % 360) % 180 !== 0;
+      widths[index] = (sideways ? info.height : info.width) * zoom;
+      heights[index] = (sideways ? info.width : info.height) * zoom;
+      tops[index + 1] = tops[index]! + heights[index]! + GAP;
+    });
+    return { count, tops, widths, heights };
+  }, [pageOrder, pages, rotations, zoom]);
+  const layoutRef = useRef(layout);
+  layoutRef.current = layout;
+
+  /** Where the column starts, in the stage's scroll coordinates. */
+  const origin = useCallback(() => {
+    if (!stage || !column.current) return 0;
+    return column.current.getBoundingClientRect().top - stage.getBoundingClientRect().top + stage.scrollTop;
+  }, [stage]);
+  /** The last page starting at or above a point in the column. */
+  const indexAt = (y: number) => {
+    const { tops, count } = layoutRef.current;
+    let low = 0;
+    let high = count - 1;
+    while (low < high) {
+      const middle = (low + high + 1) >> 1;
+      if (tops[middle]! <= y) low = middle;
+      else high = middle - 1;
+    }
+    return Math.max(0, low);
   };
 
   const scrollToPage = useCallback(
     (index: number, top = 0, behavior: ScrollBehavior = "auto") => {
-      const source = pageOrder[index];
-      const slot = source === undefined ? null : slots.current.get(index);
-      if (!stage || !slot) return;
+      const { tops, heights, count } = layoutRef.current;
+      if (!stage || index < 0 || index >= count) return;
       reported.current = index;
-      const offset = slot.offsetTop + slot.offsetHeight * top - (top > 0 ? stage.clientHeight * 0.2 : GAP / 2);
+      const offset = origin() + tops[index]! + heights[index]! * top - (top > 0 ? stage.clientHeight * 0.2 : GAP / 2);
       stage.scrollTo({ top: Math.max(0, offset), behavior });
     },
-    [pageOrder, stage],
+    [origin, stage],
   );
   useImperativeHandle(
     ref,
@@ -84,10 +119,11 @@ export const DocumentView = forwardRef<
         reported.current = index;
       },
       reveal: (index: number, top: number, bottom: number) => {
-        const slot = slots.current.get(index);
-        if (!stage || !slot) return;
-        const start = slot.offsetTop + slot.offsetHeight * top;
-        const end = slot.offsetTop + slot.offsetHeight * bottom;
+        const { tops, heights, count } = layoutRef.current;
+        if (!stage || index < 0 || index >= count) return;
+        const base = origin() + tops[index]!;
+        const start = base + heights[index]! * top;
+        const end = base + heights[index]! * bottom;
         const view = stage.scrollTop;
         const height = stage.clientHeight;
         if (start >= view + height * 0.08 && end <= view + height * 0.8) return;
@@ -95,7 +131,7 @@ export const DocumentView = forwardRef<
         stage.scrollTo({ top: Math.max(0, start - height * 0.25), behavior: "smooth" });
       },
     }),
-    [scrollToPage, stage],
+    [origin, scrollToPage, stage],
   );
 
   // Navigation from elsewhere (thumbnails, search, keyboard) scrolls to the page.
@@ -105,61 +141,51 @@ export const DocumentView = forwardRef<
 
   // Keep the reading position when zoom or page sizes change.
   const anchor = useRef<{ index: number; fraction: number } | null>(null);
-  useEffect(() => {
-    if (!stage) return;
-    const remember = () => {
-      const slot = slots.current.get(reported.current);
-      if (slot) anchor.current = { index: reported.current, fraction: (stage.scrollTop - slot.offsetTop) / Math.max(1, slot.offsetHeight) };
-    };
-    remember();
-    stage.addEventListener("scroll", remember, { passive: true });
-    return () => stage.removeEventListener("scroll", remember);
-  }, [stage]);
-
-  // The current page is whichever covers the upper part of the viewport.
+  // Which pages are near the viewport, and which one is current: the page
+  // covering the upper part of the viewport.
+  const update = useCallback(() => {
+    const { tops, heights, count } = layoutRef.current;
+    if (!stage || !count) return;
+    const scroll = stage.scrollTop - origin();
+    const first = indexAt(scroll - MARGIN);
+    const last = indexAt(scroll + stage.clientHeight + MARGIN);
+    setVisible((current) => (current.first === first && current.last === last ? current : { first, last }));
+    const current = indexAt(scroll + stage.clientHeight * 0.35);
+    if (current !== reported.current) {
+      reported.current = current;
+      onPageChange(current);
+    }
+    const index = reported.current;
+    if (index < count) anchor.current = { index, fraction: (scroll - tops[index]!) / Math.max(1, heights[index]!) };
+  }, [stage, origin, onPageChange]);
   useEffect(() => {
     if (!stage) return;
     let frame = 0;
-    const track = () => {
+    const schedule = () => {
       cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(() => {
-        const line = stage.scrollTop + stage.clientHeight * 0.35;
-        let current = 0;
-        for (const [index, slot] of slots.current) if (slot.offsetTop <= line && index > current) current = index;
-        if (current !== reported.current && current < latest.current.pageOrder.length) {
-          reported.current = current;
-          onPageChange(current);
-        }
-      });
+      frame = requestAnimationFrame(update);
     };
-    stage.addEventListener("scroll", track, { passive: true });
+    stage.addEventListener("scroll", schedule, { passive: true });
+    const observer = new ResizeObserver(schedule);
+    observer.observe(stage);
     return () => {
       cancelAnimationFrame(frame);
-      stage.removeEventListener("scroll", track);
+      observer.disconnect();
+      stage.removeEventListener("scroll", schedule);
     };
-  }, [stage, onPageChange]);
-
-  useEffect(() => {
+  }, [stage, update]);
+  // A different set or size of pages moves what is near the viewport.
+  useLayoutEffect(() => {
     if (!stage) return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        setVisible((current) => {
-          const next = new Set(current);
-          for (const entry of entries) {
-            const index = Number((entry.target as HTMLElement).dataset.index);
-            if (entry.isIntersecting) next.add(index);
-            else next.delete(index);
-          }
-          return next.size === current.size && [...next].every((item) => current.has(item)) ? current : next;
-        });
-      },
-      { root: stage, rootMargin: "300px 0px" },
-    );
-    slots.current.forEach((slot) => observer.observe(slot));
-    return () => observer.disconnect();
-  }, [stage, pageOrder, zoom]);
+    const { first, last } = latest.current.visible;
+    const count = layout.count;
+    if (first >= count || last >= count) setVisible({ first: Math.min(first, Math.max(0, count - 1)), last: Math.min(last, Math.max(0, count - 1)) });
+    const frame = requestAnimationFrame(update);
+    return () => cancelAnimationFrame(frame);
+  }, [layout, stage, update]);
 
-  const visibleSources = [...visible].map((index) => pageOrder[index]).filter((source): source is number => source !== undefined);
+  const visibleSources: number[] = [];
+  for (let index = visible.first; index <= visible.last; index += 1) if (pageOrder[index] !== undefined) visibleSources.push(pageOrder[index]!);
   const visibleKey = visibleSources.sort((a, b) => a - b).join(",");
   useEffect(() => {
     onVisibleChange(visibleKey ? visibleKey.split(",").map(Number) : []);
@@ -188,9 +214,7 @@ export const DocumentView = forwardRef<
       for (;;) {
         const { visible: shown, images: cached, renderScale: scale, pageOrder: order, page: currentPage } = latest.current;
         const wanted = new Set<number>();
-        shown.forEach((index) => {
-          for (let near = index - RENDER_AHEAD; near <= index + RENDER_AHEAD; near += 1) if (near >= 0 && near < order.length) wanted.add(near);
-        });
+        for (let near = shown.first - RENDER_AHEAD; near <= shown.last + RENDER_AHEAD; near += 1) if (near >= 0 && near < order.length) wanted.add(near);
         const next = [...wanted]
           .sort((a, b) => Math.abs(a - currentPage) - Math.abs(b - currentPage))
           .map((index) => order[index]!)
@@ -211,7 +235,7 @@ export const DocumentView = forwardRef<
             updated.set(next, { url, scale });
             // Drop renders far from the viewport once the cache is full.
             for (const [source, item] of updated) {
-              if (updated.size <= MAX_CACHED) break;
+              if (updated.size <= PAGE_CACHE_SIZE) break;
               if (!keep.has(source)) {
                 URL.revokeObjectURL(item.url);
                 updated.delete(source);
@@ -229,36 +253,42 @@ export const DocumentView = forwardRef<
   }, []);
   useEffect(() => pump(), [visible, renderScale, pageOrder, images.size, documentKey, pump]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!stage || !anchor.current) return;
     const { index, fraction } = anchor.current;
-    const slot = slots.current.get(index);
-    if (slot) stage.scrollTop = slot.offsetTop + fraction * slot.offsetHeight;
+    const { tops, heights, count } = layoutRef.current;
+    if (index < count) stage.scrollTop = origin() + tops[index]! + fraction * heights[index]!;
     // Only zoom and rotation should restore the anchor, not every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [zoom, rotations]);
 
+  const { tops, widths, heights, count } = layout;
+  const first = Math.max(0, Math.min(visible.first, count - 1) - RENDER_AHEAD);
+  const last = Math.min(count - 1, visible.last + RENDER_AHEAD);
+  let widest = 0;
+  for (let index = 0; index < count; index += 1) widest = Math.max(widest, Math.max(0, (viewportWidth - widths[index]!) / 2) + widths[index]!);
+  const slots: ReactNode[] = [];
+  for (let index = first; index <= last && count; index += 1) {
+    const source = pageOrder[index]!;
+    slots.push(
+      <div
+        key={source}
+        data-index={index}
+        data-page={index + 1}
+        className="pageSlot"
+        style={{ width: widths[index], height: heights[index], marginLeft: Math.max(0, (viewportWidth - widths[index]!) / 2) }}
+      >
+        {props.children({ source, index, image: images.get(source)?.url ?? null, active: index === page })}
+      </div>,
+    );
+  }
   return (
-    <div className="pageColumn" style={{ gap: GAP }}>
-      {pageOrder.map((source, index) => {
-        const size = sizeOf(source);
-        const near = [...visible].some((item) => Math.abs(item - index) <= RENDER_AHEAD);
-        return (
-          <div
-            key={source}
-            data-index={index}
-            data-page={index + 1}
-            className="pageSlot"
-            style={{ width: size.width, height: size.height, marginLeft: Math.max(0, (viewportWidth - size.width) / 2) }}
-            ref={(node) => {
-              if (node) slots.current.set(index, node);
-              else slots.current.delete(index);
-            }}
-          >
-            {near ? props.children({ source, index, image: images.get(source)?.url ?? null, active: index === page }) : <div className="pagePlaceholder" />}
-          </div>
-        );
-      })}
+    <div
+      ref={column}
+      className="pageColumn"
+      style={{ gap: GAP, minWidth: widest, paddingTop: count ? tops[first] : 0, paddingBottom: count ? tops[count]! - tops[last + 1]! : 0 }}
+    >
+      {slots}
     </div>
   );
 });

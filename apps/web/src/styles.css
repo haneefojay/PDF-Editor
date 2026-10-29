@@ -5,16 +5,19 @@
   --raised: #ffffff;
   --stage: #d3d1ca;
   --text: #171714;
-  --muted: #6b6962;
-  --faint: #8f8d85;
+  /* Text tokens meet WCAG AA (4.5:1) on every surface, including hover. */
+  --muted: #5f5d56;
+  --faint: #66645d;
   --line: #d5d2c9;
   --line-strong: #c4c1b7;
   --hover: #e8e5dd;
   --accent: #d64b35;
   --accent-strong: #b23e2e;
   --accent-soft: #f6e3de;
+  --accent-text: #b23e2e;
   --select: #2f6fed;
   --select-soft: #2f6fed14;
+  --select-text: #2558c4;
   --danger: #a32e21;
   --ok: #35523b;
   --ok-soft: #dce8d7;
@@ -45,15 +48,17 @@
     --stage: #121211;
     --text: #edebe4;
     --muted: #aaa79e;
-    --faint: #85837b;
+    --faint: #a39f96;
     --line: #3a3934;
     --line-strong: #4a4842;
     --hover: #34332e;
     --accent: #ec6a52;
     --accent-strong: #f08672;
     --accent-soft: #4a2a23;
+    --accent-text: #f08672;
     --select: #6b9bff;
     --select-soft: #6b9bff1f;
+    --select-text: #6b9bff;
     --danger: #ff8a7a;
     --ok: #a9d3b0;
     --ok-soft: #26362a;
@@ -179,7 +184,7 @@ svg {
   margin: 14px 0;
 }
 .hero h1 em {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 .hero > p {
   color: var(--muted);
@@ -224,7 +229,7 @@ svg {
 .secondaryButton svg {
   width: 18px;
   height: 18px;
-  color: var(--accent);
+  color: var(--accent-text);
 }
 .printFrame {
   position: fixed;
@@ -277,7 +282,7 @@ svg {
   text-align: left;
 }
 .recent button:first-child svg {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 .recent button:first-child span {
   display: grid;
@@ -331,7 +336,10 @@ svg {
   display: grid;
   min-width: 0;
 }
-.file b {
+.file h1 {
+  margin: 0;
+  font-weight: 700;
+  line-height: inherit;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -589,7 +597,7 @@ svg {
   align-items: center;
   gap: 5px;
   font-weight: 600;
-  color: var(--select);
+  color: var(--select-text);
 }
 details.more {
   position: relative;
@@ -664,6 +672,7 @@ details.more > div label {
   min-height: 30px;
 }
 .thumb {
+  position: relative;
   padding: 8px;
   border: 2px solid transparent;
   border-radius: 10px;
@@ -706,13 +715,31 @@ details.more > div label {
     background-position: -200% 0;
   }
 }
+.toolArea {
+  display: contents;
+}
+.thumbButton {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
 .thumbFooter {
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  min-height: 24px;
   margin-top: 5px;
   font-size: 12px;
   color: var(--muted);
+}
+.thumb > .pageActions {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
 }
 .pageActions {
   display: flex;
@@ -1281,24 +1308,24 @@ details.more > div label {
 .modal.ocrModal {
   width: min(780px, 100%);
 }
-.modal > header {
+.modal > .modalHeader {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
   gap: 12px;
   padding: 18px 20px 8px;
 }
-.modal > header h2 {
+.modal > .modalHeader h2 {
   margin: 0;
   font-size: 18px;
 }
-.modal > header p {
+.modal > .modalHeader p {
   margin: 4px 0 0;
   color: var(--muted);
   font-size: 13px;
   line-height: 1.4;
 }
-.modal > header button {
+.modal > .modalHeader button {
   display: grid;
   place-items: center;
   width: 34px;
@@ -1307,7 +1334,7 @@ details.more > div label {
   border-radius: 8px;
   background: transparent;
 }
-.modal > header button:hover {
+.modal > .modalHeader button:hover {
   background: var(--hover);
 }
 .modalBody {
@@ -1976,7 +2003,7 @@ details.more > div label {
   padding-top: max(2px, env(safe-area-inset-top));
   box-shadow: 0 1px 0 var(--line);
 }
-.app.phone .file b {
+.app.phone .file h1 {
   font-size: 15px;
 }
 .app.phone .file small {
@@ -2745,7 +2772,7 @@ span.scanIcon {
 }
 .outlineTools button[aria-pressed="true"] {
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 .outlineEdit {
   display: flex;

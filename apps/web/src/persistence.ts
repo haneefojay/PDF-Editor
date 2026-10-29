@@ -28,8 +28,18 @@ async function readOpfs(id: string) {
   return (await handle.getFile()).arrayBuffer();
 }
 
+/** The PDF bytes last written for each project, so edits alone don't rewrite the whole file. */
+const persisted = new Map<string, ArrayBuffer>();
+
 export async function saveProject(input: { id: string; name: string; bytes: ArrayBuffer; snapshot: EditorDocument }) {
   const snapshot = EditorDocumentSchema.parse(input.snapshot);
+  if (persisted.get(input.id) === input.bytes) {
+    const updated = await db.projects.update(input.id, { name: input.name, updatedAt: Date.now(), pageCount: snapshot.pageOrder.length, snapshot });
+    if (updated) {
+      localStorage.setItem("paperless:last-project", input.id);
+      return;
+    }
+  }
   let storage: ProjectRecord["storage"] = "opfs";
   let fallbackBytes: ArrayBuffer | undefined;
   try {
@@ -39,6 +49,7 @@ export async function saveProject(input: { id: string; name: string; bytes: Arra
     fallbackBytes = input.bytes.slice(0);
   }
   await db.projects.put({ id: input.id, name: input.name, updatedAt: Date.now(), pageCount: snapshot.pageOrder.length, storage, bytes: fallbackBytes, snapshot });
+  persisted.set(input.id, input.bytes);
   localStorage.setItem("paperless:last-project", input.id);
 }
 
@@ -58,6 +69,7 @@ export async function loadProject(id: string) {
 }
 
 export async function deleteProject(id: string) {
+  persisted.delete(id);
   const record = await db.projects.get(id);
   await db.projects.delete(id);
   if (record?.storage === "opfs") {

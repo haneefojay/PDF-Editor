@@ -133,6 +133,8 @@ import { createZip, describeGroup, parseRanges, splitEvery } from "./split";
 import { ScanSession, type ScanResult } from "./scan/ScanSession";
 import { AutoScrollBar, ReadAloudBar } from "./ReadingBar";
 import { AiAssistant } from "./AiAssistant";
+import { Thumbnail, ThumbnailStore, WindowedItems } from "./thumbnails";
+import { PAGE_PIXEL_BUDGET } from "./device";
 import { sentencesOf, type Box, type Sentence } from "./readAloud";
 import { PAGE_SIZES, mapCrop, mapOverlay, mmToPoints, pointsToMm, presetOf, targetSize, type Orientation, type PageSizePreset } from "./pageSize";
 
@@ -191,6 +193,8 @@ const withTimeout = <T,>(promise: Promise<T>, milliseconds: number, message: str
       },
     );
   });
+/** Pages whose text, links and images are kept loaded. */
+const MAX_PAGE_DATA = 48;
 const pngUrl = (png: Uint8Array) => {
   const copy = new Uint8Array(png.byteLength);
   copy.set(png);
@@ -200,23 +204,6 @@ const isTyping = (target: EventTarget | null) =>
   target instanceof HTMLElement && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName));
 const toolShortcuts: Partial<Record<string, Tool>> = { v: "select", t: "text", d: "ink", e: "eraser", h: "markup", n: "note", r: "shape", l: "line", s: "signature" };
 const shortcutFor = (tool: Tool) => Object.entries(toolShortcuts).find(([, value]) => value === tool)?.[0]?.toUpperCase();
-
-function Thumbnail({ source, rotation, url, onVisible }: { source: number; rotation: number; url?: string; onVisible: (source: number) => void }) {
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (url || !ref.current) return;
-    const observer = new IntersectionObserver((entries) => {
-      if (entries.some((entry) => entry.isIntersecting)) onVisible(source);
-    }, { rootMargin: "200px" });
-    observer.observe(ref.current);
-    return () => observer.disconnect();
-  }, [onVisible, source, url]);
-  return (
-    <div ref={ref} className="thumbPreview">
-      {url ? <img src={url} alt="" draggable={false} style={{ transform: rotation ? `rotate(${rotation}deg)` : undefined }} /> : <span className="thumbLoading" />}
-    </div>
-  );
-}
 
 export function App() {
   const engine = useRef<Engine | null>(null);
@@ -236,8 +223,7 @@ export function App() {
   const pinch = useRef<{ distance: number; zoom: number; contentX: number; contentY: number; offsetX: number; offsetY: number } | null>(null);
   const loadSequence = useRef(0);
   const clipboard = useRef<Overlay | null>(null);
-  // Thumbnails render one at a time so they never starve the main page.
-  const thumbQueue = useRef<{ pending: Set<number>; running: boolean; generation: number }>({ pending: new Set(), running: false, generation: 0 });
+  const thumbnails = useRef(new ThumbnailStore());
   const fontsReady = usePreviewFonts();
 
   const [open, setOpen] = useState<OpenDoc | null>(null);
@@ -285,7 +271,6 @@ export function App() {
   const [confidenceThreshold, setConfidenceThreshold] = useState(75);
   const [metadataDraft, setMetadataDraft] = useState<PdfMetadata>({ title: "", author: "", subject: "", keywords: "" });
   const [recent, setRecent] = useState<ProjectSummary[]>([]);
-  const [thumbs, setThumbs] = useState<Map<number, string>>(new Map());
   const [busy, setBusy] = useState("");
   const [saving, setSaving] = useState(false);
   const [exporting, setExporting] = useState(false);
@@ -414,8 +399,7 @@ export function App() {
   const api = () => engine.current!.api;
 
   const resetView = () => {
-    thumbQueue.current.generation += 1;
-    thumbQueue.current.pending.clear();
+    thumbnails.current.reset();
     setPageData(new Map());
     setOutline([]);
     setSelectedId(null);
@@ -423,10 +407,6 @@ export function App() {
     setOriginalEdit(null);
     setSearchHighlight(null);
     setFindResults(null);
-    setThumbs((current) => {
-      current.forEach((url) => URL.revokeObjectURL(url));
-      return new Map();
-    });
   };
 
   const openBytes = useCallback(
@@ -580,11 +560,16 @@ export function App() {
   const [renderScale, setRenderScale] = useState(1.5);
 
   // Keep the render resolution in step with zoom so pages stay sharp.
+  // Very large pages, or a deep zoom on a small phone, stay within a pixel
+  // budget so a few rendered pages cannot exhaust memory.
+  const pageArea = pageInfo ? pageInfo.width * pageInfo.height : 612 * 792;
   useEffect(() => {
-    const target = Math.min(4, Math.max(1, Math.ceil(zoom * Math.min(3, window.devicePixelRatio || 1) * 2) / 2));
+    const sharp = Math.ceil(zoom * Math.min(3, window.devicePixelRatio || 1) * 2) / 2;
+    const affordable = Math.floor(Math.sqrt(PAGE_PIXEL_BUDGET / pageArea) * 2) / 2;
+    const target = Math.min(4, Math.max(0.5, Math.min(Math.max(1, sharp), affordable)));
     const timer = window.setTimeout(() => setRenderScale(target), 180);
     return () => window.clearTimeout(timer);
-  }, [zoom]);
+  }, [zoom, pageArea]);
 
   const openBytesRef = open?.bytes;
   const openPassword = open?.password;
@@ -637,7 +622,17 @@ export function App() {
         ])
           .then(([lines, links, images]) => {
             if (bytes !== currentBytes.current) return;
-            setPageData((current) => new Map(current).set(source, { lines, links, images }));
+            setPageData((current) => {
+              const next = new Map(current).set(source, { lines, links, images });
+              // Keep memory flat on long documents: drop the pages read longest ago.
+              for (const old of next.keys()) {
+                if (next.size <= MAX_PAGE_DATA) break;
+                if (sources.includes(old)) continue;
+                next.delete(old);
+                pageDataLoading.current.delete(old);
+              }
+              return next;
+            });
           })
           .catch(() => pageDataLoading.current.delete(source));
       }
@@ -649,36 +644,10 @@ export function App() {
   }, [openBytesRef, sourcePage, doc.pageOrder.length, loadPageData]);
   const textLines = pageData.get(sourcePage)?.lines ?? [];
 
-  const requestThumb = useCallback(
-    (source: number) => {
-      const queue = thumbQueue.current;
-      queue.pending.add(source);
-      if (queue.running) return;
-      queue.running = true;
-      void (async () => {
-        while (queue.pending.size) {
-          const next = queue.pending.values().next().value as number;
-          queue.pending.delete(next);
-          const info = open?.pages[next];
-          if (!info) continue;
-          const generation = queue.generation;
-          try {
-            const png = await api().renderPage(next, Math.min(0.5, 220 / Math.max(info.width, info.height)));
-            // A different document was opened while this page rendered.
-            if (generation !== queue.generation) continue;
-            setThumbs((current) => {
-              if (current.has(next)) return current;
-              return new Map(current).set(next, pngUrl(png));
-            });
-          } catch {
-            break;
-          }
-        }
-        queue.running = false;
-      })();
-    },
-    [open?.pages],
-  );
+  thumbnails.current.render = (source) => {
+    const info = open?.pages[source];
+    return info ? api().renderPage(source, Math.min(0.5, 220 / Math.max(info.width, info.height))) : null;
+  };
 
   useEffect(() => {
     if (!open || !doc.pageOrder.length) return;
@@ -1638,10 +1607,11 @@ export function App() {
             line.y + line.height / 2 >= overlay.y &&
             line.y + line.height / 2 <= overlay.y + overlay.height,
         );
+      // One call searches every page inside the engine, so long documents
+      // don't pay for a round trip per page.
+      const found = new Map((await withTimeout(api().findText(findQuery, matchCase), 120_000, "Text search took too long.")).map((item) => [item.page, item.lines]));
       for (const source of doc.pageOrder) {
-        const lines = await withTimeout(api().extractTextLines(source), 20_000, `Text search timed out on page ${doc.pageOrder.indexOf(source) + 1}.`);
-        for (const line of lines)
-          if ((matchCase ? line.text : line.text.toLocaleLowerCase()).includes(needle) && !erasedOn(source, line)) results.push({ sourcePage: source, line });
+        for (const line of found.get(source) ?? []) if (!erasedOn(source, line)) results.push({ sourcePage: source, line });
         for (const overlay of doc.overlays) {
           if (overlay.kind !== "text" || overlay.page !== source) continue;
           if (!(matchCase ? overlay.text : overlay.text.toLocaleLowerCase()).includes(needle)) continue;
@@ -1784,6 +1754,10 @@ export function App() {
       if (!lines) {
         lines = api().extractTextLines(source);
         sourceLines.current.set(source, lines);
+        for (const old of sourceLines.current.keys()) {
+          if (sourceLines.current.size <= MAX_PAGE_DATA) break;
+          sourceLines.current.delete(old);
+        }
       }
       const onPage = doc.overlays.filter((overlay) => overlay.page === source);
       const erased = onPage.filter((overlay) => overlay.kind === "redact");
@@ -2743,7 +2717,7 @@ export function App() {
             <ChevronLeft />
           </button>
           <div>
-            <b title={open.name}>{open.name}</b>
+            <h1 title={open.name}>{open.name}</h1>
             <small>
               {doc.pageOrder.length} page{doc.pageOrder.length === 1 ? "" : "s"} · {saving ? "Saving…" : "Saved on this device"}
             </small>
@@ -2785,8 +2759,12 @@ export function App() {
           </button>
         </div>
       </header>
-      {!isPhone && ribbonBar}
-      {!isPhone && contextContent && <div className="contextBar">{contextContent}</div>}
+      {!isPhone && (
+        <section className="toolArea" aria-label="Tools">
+          {ribbonBar}
+          {contextContent && <div className="contextBar">{contextContent}</div>}
+        </section>
+      )}
       <div className={`work ${showRail ? "withRail" : ""} ${showComments ? "withComments" : ""}`}>
         {showRail && (
           <aside className="rail" aria-label="Pages and outline">
@@ -2888,14 +2866,14 @@ export function App() {
                 )}
               </nav>
             )}
-            {railTab === "pages" && doc.pageOrder.map((source, index) => (
+            {railTab === "pages" && (
+              <WindowedItems count={doc.pageOrder.length} gap={6} estimate={220} revealIndex={page}>
+                {(index) => {
+                  const source = doc.pageOrder[index]!;
+                  return (
               <div
                 key={source}
-                role="button"
-                tabIndex={0}
                 className={index === page ? "thumb active" : "thumb"}
-                aria-label={`Page ${index + 1}`}
-                aria-current={index === page ? "page" : undefined}
                 draggable
                 onDragStart={(event) => event.dataTransfer.setData("text/x-page", String(index))}
                 onDragOver={(event) => {
@@ -2911,31 +2889,35 @@ export function App() {
                   event.stopPropagation();
                   movePage(Number(from), index);
                 }}
-                onClick={() => {
-                  setPage(index);
-                  if (window.innerWidth < 760) setShowRail(false);
-                }}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") setPage(index);
-                }}
               >
-                <Thumbnail source={source} rotation={doc.rotations[source] ?? 0} url={thumbs.get(source)} onVisible={requestThumb} />
-                <span className="thumbFooter">
-                  <span>{index + 1}</span>
-                  <span className="pageActions">
-                    <button aria-label={`Move page ${index + 1} up`} disabled={index === 0} onClick={(event) => { event.stopPropagation(); movePage(index, index - 1); }}>
-                      <ArrowUp />
-                    </button>
-                    <button aria-label={`Move page ${index + 1} down`} disabled={index === doc.pageOrder.length - 1} onClick={(event) => { event.stopPropagation(); movePage(index, index + 1); }}>
-                      <ArrowDown />
-                    </button>
-                    <button aria-label={`Delete page ${index + 1}`} disabled={doc.pageOrder.length < 2} onClick={(event) => { event.stopPropagation(); removePages([index]); }}>
-                      <Trash2 />
-                    </button>
-                  </span>
+                <button
+                  className="thumbButton"
+                  aria-label={`Page ${index + 1}`}
+                  aria-current={index === page ? "page" : undefined}
+                  onClick={() => {
+                    setPage(index);
+                    if (window.innerWidth < 760) setShowRail(false);
+                  }}
+                >
+                  <Thumbnail store={thumbnails.current} source={source} rotation={doc.rotations[source] ?? 0} />
+                  <span className="thumbFooter">{index + 1}</span>
+                </button>
+                <span className="pageActions">
+                  <button aria-label={`Move page ${index + 1} up`} disabled={index === 0} onClick={() => movePage(index, index - 1)}>
+                    <ArrowUp />
+                  </button>
+                  <button aria-label={`Move page ${index + 1} down`} disabled={index === doc.pageOrder.length - 1} onClick={() => movePage(index, index + 1)}>
+                    <ArrowDown />
+                  </button>
+                  <button aria-label={`Delete page ${index + 1}`} disabled={doc.pageOrder.length < 2} onClick={() => removePages([index])}>
+                    <Trash2 />
+                  </button>
                 </span>
               </div>
-            ))}
+                  );
+                }}
+              </WindowedItems>
+            )}
           </aside>
         )}
         <main className="canvasArea">
@@ -3184,7 +3166,7 @@ export function App() {
         )}
       </div>
       {isPhone && (
-        <div className="phoneDock">
+        <section className="phoneDock" aria-label="Tools">
           {contextContent && <div className="contextBar">{contextContent}</div>}
           {trayOpen && ribbonBar}
           <nav className="bottomNav" role="tablist" aria-label="Tool groups">
@@ -3195,7 +3177,7 @@ export function App() {
               </button>
             ))}
           </nav>
-        </div>
+        </section>
       )}
       {hiddenInputs}
 
@@ -3457,8 +3439,10 @@ export function App() {
               <Trash2 /> Delete
             </button>
           </div>
-          <div className="organizerGrid">
-            {doc.pageOrder.map((source, index) => (
+          <WindowedItems className="organizerGrid" count={doc.pageOrder.length} minColumnWidth={110} gap={10} estimate={190}>
+            {(index) => {
+              const source = doc.pageOrder[index]!;
+              return (
               <label
                 key={`${source}-${index}`}
                 className={selectedPages.includes(index) ? "selected" : ""}
@@ -3473,11 +3457,12 @@ export function App() {
                 }}
               >
                 <input type="checkbox" checked={selectedPages.includes(index)} onChange={(event) => setSelectedPages((pages) => (event.target.checked ? [...pages, index] : pages.filter((item) => item !== index)))} />
-                <Thumbnail source={source} rotation={doc.rotations[source] ?? 0} url={thumbs.get(source)} onVisible={requestThumb} />
+                <Thumbnail store={thumbnails.current} source={source} rotation={doc.rotations[source] ?? 0} />
                 <span>{index + 1}</span>
               </label>
-            ))}
-          </div>
+              );
+            }}
+          </WindowedItems>
         </Modal>
       )}
 
