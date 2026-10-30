@@ -84,12 +84,16 @@ async function measure(browser, pdf) {
   result.frameMedianMs = median(frames);
   result.frameP95Ms = percentile(frames, 0.95);
 
-  const target = Math.min(pages, 900);
-  started = performance.now();
-  await page.locator(".pageInput").fill(String(target));
-  await page.locator(".pageInput").press("Enter");
-  await page.locator(`.pageSlot[data-index="${target - 1}"] .page > img`).waitFor({ timeout: 120_000 });
-  result.jumpSeconds = (performance.now() - started) / 1000;
+  // The phone layout keeps the page box, the rail and search in drawers, so
+  // those steps run only where the controls are on screen.
+  if (await page.locator(".pageInput").isVisible()) {
+    const target = Math.min(pages, 900);
+    started = performance.now();
+    await page.locator(".pageInput").fill(String(target));
+    await page.locator(".pageInput").press("Enter");
+    await page.locator(`.pageSlot[data-index="${target - 1}"] .page > img`).waitFor({ timeout: 120_000 });
+    result.jumpSeconds = (performance.now() - started) / 1000;
+  }
 
   // Scroll the thumbnail rail to its end, letting thumbnails render on the way.
   if (await page.locator(".rail").isVisible()) {
@@ -116,10 +120,13 @@ async function measure(browser, pdf) {
     return (performance.now() - begun) / 1000;
   };
   await page.keyboard.press("Control+f");
-  await page.getByRole("textbox", { name: "Find", exact: true }).fill(`Line 20 of page ${pages}`);
-  result.searchSeconds = await search();
-  await page.getByRole("textbox", { name: "Find", exact: true }).fill(`Line 19 of page ${pages}`);
-  result.searchAgainSeconds = await search();
+  const find = page.getByRole("textbox", { name: "Find", exact: true });
+  if (await find.waitFor({ timeout: 5000 }).then(() => true, () => false)) {
+    await find.fill(`Line 20 of page ${pages}`);
+    result.searchSeconds = await search();
+    await find.fill(`Line 19 of page ${pages}`);
+    result.searchAgainSeconds = await search();
+  }
 
   await context.close();
   return result;
@@ -133,4 +140,4 @@ await browser.close();
 
 const round = (value) => (value === undefined ? "-" : value < 10 ? value.toFixed(2) : Math.round(value));
 console.log(`${pages}-page PDF, ${phone ? "Pixel 7 with CPU slowed 4x" : "desktop 1400x900"}, median of ${runs} runs (${url})`);
-for (const key of Object.keys(results[0])) console.log(`${key.padEnd(20)} ${round(median(results.map((result) => result[key])))}`);
+for (const key of Object.keys(results[0])) console.log(`${key.padEnd(20)} ${round(median(results.map((result) => result[key]).filter((value) => value !== undefined)))}`);
