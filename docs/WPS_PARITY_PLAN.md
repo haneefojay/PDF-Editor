@@ -62,19 +62,18 @@ WPS Office's PDF tool sets the bar this plan aims for. It covers reading, editin
 - Fast on 1,000-page documents, with memory caps for rendered pages.
 - Accessibility: screen-reader labels, focus order, and contrast.
 - Real-device Android testing on low-end phones.
-- Results on a 1,000-page PDF, production build in Chromium:
+- Results on a 1,000-page PDF, production build in Chromium on a 1400 × 900 desktop window, median of 3 runs of [`scripts/bench-long-document.mjs`](../scripts/bench-long-document.mjs). "Before" is commit 43c1f43, the last commit before M6:
 
   | | Before | After |
   | --- | --- | --- |
-  | Open | 3.7 s | 0.8 s |
-  | DOM nodes after opening | 23,213 | 365 |
-  | JS heap after opening | 56 MB | 13 MB |
-  | Scroll frame time, median / 95th percentile | 49 / 298 ms | 20 / 34 ms |
-  | Jump to page 900 | 3.0 s | 0.17 s |
-  | Heap after scrolling the whole thumbnail rail | 133 MB | 18 MB |
-  | First / repeated search of the whole document | 9.5 s / 9.5 s | 7.0 s / 1.3 s |
+  | Open | 2.3 s | 0.73 s |
+  | DOM nodes after opening | 23,203 | 356 |
+  | JS heap after opening (after garbage collection) | 20 MB | 6.5 MB |
+  | Scroll frame time, median / 95th percentile | 33 / 267 ms | 17 / 17 ms |
+  | Jump to page 900 | 1.8 s | 0.15 s |
+  | Heap after scrolling the whole thumbnail rail | 34 MB | 7.4 MB |
+  | First / second search of the whole document | 199 s / 3.0 s | 2.1 s / 0.16 s |
 
-  On a phone profile with the CPU slowed four times, it opens in 2.2 s and scrolls at 30 ms per frame (81 ms at the 95th percentile).
 - How it works: the page column and the thumbnail lists only build the items near the screen, using positions computed from page sizes. Thumbnails live outside React state in a store capped at 160, so a finished thumbnail redraws only itself. Page text and links are cached for at most 48 pages. Rendered pages stay within a pixel budget (4, 8 or 16 megapixels, from the device's reported memory), and phones with 2 GB or less keep fewer rendered pages. Search runs in the engine in one call and remembers page text, so repeated searches skip pages that cannot match. Autosave rewrites the PDF only when the file itself changes, not after every edit.
 - Accessibility: an axe audit (WCAG 2.1 A/AA and best practices) runs in the test suite on desktop and phone, in light and dark themes, with no exceptions. Text colours meet 4.5:1 on every surface; thumbnails no longer nest buttons; dialogs make the rest of the app inert, trap Tab and return focus to the control that opened them; the document name is the page's heading and the tool area is a landmark.
 - Still to do: testing on real low-end Android phones, which needs devices. The phone emulation above is an estimate, not a substitute.
