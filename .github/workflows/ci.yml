@@ -14,6 +14,11 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # The conversion tests open the converted files with these libraries.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install python-docx==1.2.0 openpyxl==3.1.5 python-pptx==1.0.2
       - run: pnpm check
   e2e:
     runs-on: ubuntu-latest

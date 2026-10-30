@@ -58,8 +58,8 @@ A local-first, privacy-first PDF editor for the web and Android, licensed under 
 **Workflow**
 - Autosave to device storage with recent projects and crash recovery.
 - Full undo/redo, keyboard shortcuts (press `?`), pinch, double-tap and Ctrl+scroll zoom, fit width/page, dark mode.
-- A phone layout with a bottom toolbar, tool trays and options in reach of your thumb; a desktop layout with tabbed tool groups. Installable as an app.
-- Built for long documents: a 1,000-page PDF opens in under a second on a desktop and in about two seconds on a slow phone, and memory stays flat however far you scroll, because only the pages and thumbnails near the screen exist and rendered pages are kept within a pixel budget that shrinks on low-memory phones.
+- A phone layout with a bottom toolbar, tool trays and options in reach of your thumb; a desktop layout with tabbed tool groups. Installable from the browser; the web version needs a connection to load, while the Android app works fully offline.
+- Built for long documents: a 1,000-page PDF opens in under a second on a desktop and in about two seconds on an emulated slow phone (Chromium with the CPU slowed four times), and memory stays flat however far you scroll, because only the pages and thumbnails near the screen exist and rendered pages are kept within a pixel budget that shrinks on low-memory phones.
 - Accessible: tested against WCAG 2.1 AA with axe on desktop and phone, in light and dark themes; dialogs keep keyboard focus inside and hide the editor behind them from screen readers.
 
 Every export is re-opened and rendered before it is handed to you; a document that fails validation is never saved.

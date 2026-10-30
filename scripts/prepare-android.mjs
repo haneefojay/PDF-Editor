@@ -21,6 +21,17 @@ public class MainActivity extends BridgeActivity {
 mkdirSync("android/app/src/main/java/dev/paperless/pdfeditor", { recursive: true });
 writeFileSync("android/app/src/main/java/dev/paperless/pdfeditor/MainActivity.java", activity);
 
+// The app version follows package.json: 1.2.3 becomes versionName "1.2.3" and versionCode 10203.
+const { version } = JSON.parse(readFileSync("package.json", "utf8"));
+const [major, minor, patch] = version.split(".").map(Number);
+const gradlePath = "android/app/build.gradle";
+writeFileSync(
+  gradlePath,
+  readFileSync(gradlePath, "utf8")
+    .replace(/versionCode \d+/, `versionCode ${major * 10000 + minor * 100 + patch}`)
+    .replace(/versionName "[^"]*"/, `versionName "${version}"`),
+);
+
 const manifestPath = "android/app/src/main/AndroidManifest.xml";
 const manifest = readFileSync(manifestPath, "utf8")
   .replace('android:allowBackup="true"', 'android:allowBackup="false"\n        android:usesCleartextTraffic="false"')
@@ -30,4 +41,4 @@ const manifest = readFileSync(manifestPath, "utf8")
 const cameraPermission = '<uses-permission android:name="android.permission.CAMERA" />\n    <uses-feature android:name="android.hardware.camera" android:required="false" />';
 const withCamera = manifest.includes("android.permission.CAMERA") ? manifest : manifest.replace("</manifest>", `    ${cameraPermission}\n</manifest>`);
 writeFileSync(manifestPath, withCamera);
-console.log("Android project prepared with backup and cleartext traffic disabled and optional camera access.");
+console.log(`Android project ${version} prepared with backup and cleartext traffic disabled and optional camera access.`);

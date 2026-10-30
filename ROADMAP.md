@@ -51,9 +51,20 @@ Release signing remains operator-controlled: production keystores must be provid
 - Tabbed tool groups, inline text and comment editing, real thumbnails, zoom-aware rendering, keyboard shortcuts, undo coalescing, line/arrow tool, text-snapped highlights, print, image and text conversion, dark mode
 - Engine tests on generated PDFs and a Playwright end-to-end suite in CI
 
+## Phase 6 — WPS-level parity (complete, apart from real-device testing)
+Milestones M1 to M6 in [docs/WPS_PARITY_PLAN.md](docs/WPS_PARITY_PLAN.md):
+- M1: continuous virtualized scrolling, the phone layout, outline, links and reading themes
+- M2: paragraph editing with reflow, editing existing images, highlighter and eraser, split and page size
+- M3: camera scanning with edge detection, perspective correction and OCR
+- M4: PDF to Word, Excel and PowerPoint, and Word, Excel and PowerPoint files opened as PDFs
+- M5: read aloud, auto-scroll, editable bookmarks, an annotation list and an optional AI assistant
+- M6: fast 1,000-page documents with memory caps, and an axe accessibility audit with no violations
+
 ## Next
-- Continuous (multi-page) scrolling view
-- Editing the content of existing vector graphics and images in place
-- PDF ↔ Word conversion, accessibility tagging, document comparison (see docs/S_CLASS_PDF_EDITOR_ROADMAP.md)
+- Testing on real low-end Android phones
+- Document comparison with a change report
+- Accessibility tagging of exported PDFs
+- Several documents open at once
+- PowerPoint charts and SmartArt; Word headers, footers and footnotes when opening Office files
 
 A feature ships only when it performs the promised PDF operation and survives export validation.
