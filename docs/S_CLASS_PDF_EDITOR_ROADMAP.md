@@ -74,10 +74,10 @@ Sources:
 
 ### Phase F — Conversion, accessibility, and automation
 
-- [ ] PDF ↔ Word/image/text conversion with layout validation. (Images → PDF, page → image and PDF → text are done; Word is not.)
+- [x] PDF ↔ Word/Excel/PowerPoint/image/text conversion: PDF to DOCX, XLSX and PPTX; DOCX, XLSX and PPTX to PDF; images to PDF, page to image and PDF to text.
 - [ ] Tagged PDF structure, reading order, alt text, language, and accessibility checks.
 - [ ] Compare documents and generate a change report.
-- [ ] Batch operations, reusable presets, and optional local AI assistance.
+- [ ] Batch operations and reusable presets. (An optional AI assistant for summaries and translation shipped, but it calls a cloud API with the user's key rather than running locally.)
 
 ## Engineering rules
 

@@ -17,11 +17,16 @@ const save = (bytes: Uint8Array, name: string) => {
   writeFileSync(path, bytes);
   return path;
 };
-/** Runs a Python check when the Office libraries are installed; returns null otherwise. */
+/**
+ * Runs a Python check with the Office libraries (python-docx, openpyxl,
+ * python-pptx). Without them it returns null locally, but fails in CI, which
+ * installs them, so the files are always checked there.
+ */
 const python = (script: string, path: string) => {
   try {
     execFileSync("python3", ["-c", "import docx, openpyxl, pptx"], { stdio: "ignore" });
   } catch {
+    if (process.env.CI) throw new Error("CI must install python-docx, openpyxl and python-pptx to check converted files.");
     return null;
   }
   return JSON.parse(execFileSync("python3", ["-c", script, path], { encoding: "utf8" })) as unknown;
