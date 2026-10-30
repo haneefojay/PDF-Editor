@@ -74,6 +74,8 @@ WPS Office's PDF tool sets the bar this plan aims for. It covers reading, editin
   | Heap after scrolling the whole thumbnail rail | 34 MB | 7.4 MB |
   | First / second search of the whole document | 199 s / 3.0 s | 2.1 s / 0.16 s |
 
+  With `--phone` (a Pixel 7 profile with the CPU slowed four times), the current build opens in 2.2 s and scrolls at 17 ms per frame (50 ms at the 95th percentile). This is emulation, not a real phone.
+
 - How it works: the page column and the thumbnail lists only build the items near the screen, using positions computed from page sizes. Thumbnails live outside React state in a store capped at 160, so a finished thumbnail redraws only itself. Page text and links are cached for at most 48 pages. Rendered pages stay within a pixel budget (4, 8 or 16 megapixels, from the device's reported memory), and phones with 2 GB or less keep fewer rendered pages. Search runs in the engine in one call and remembers page text, so repeated searches skip pages that cannot match. Autosave rewrites the PDF only when the file itself changes, not after every edit.
 - Accessibility: an axe audit (WCAG 2.1 A/AA and best practices) runs in the test suite on desktop and phone, in light and dark themes, with no exceptions. Text colours meet 4.5:1 on every surface; thumbnails no longer nest buttons; dialogs make the rest of the app inert, trap Tab and return focus to the control that opened them; the document name is the page's heading and the tool area is a landmark.
 - Still to do: testing on real low-end Android phones, which needs devices. The phone emulation above is an estimate, not a substitute.
