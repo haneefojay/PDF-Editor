@@ -26,6 +26,12 @@ export type {
   PdfWorkerApi,
   PositionedTextLine,
   SignatureStatus,
+  SlideColor,
+  SlideFill,
+  SlideItem,
+  SlideMatrix,
+  SlidePart,
+  SlidePath,
 } from "./protocol";
 export function createPdfEngine() {
   const worker = new Worker(new URL("./mupdf.worker.ts", import.meta.url), {

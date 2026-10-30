@@ -31,7 +31,7 @@ A local-first, privacy-first PDF editor for the web and Android, licensed under 
 - PDF to Word (.docx) with editable paragraphs, headings, lists, tables and pictures, one Word page per PDF page.
 - PDF to Excel (.xlsx): tables cell for cell, printed numbers stored as numbers with their currency, percent and grouping formats.
 - PDF to PowerPoint (.pptx): one slide per page, pictures and drawings as the slide background, text as editable text boxes.
-- Open Word (.docx) and Excel (.xlsx) files as PDFs, or insert them into an open PDF.
+- Open Word (.docx), Excel (.xlsx) and PowerPoint (.pptx) files as PDFs, or insert them into an open PDF. Slides keep their layout, theme colours and fonts, shapes, pictures, tables and slide numbers; hidden slides are left out.
 - Everything converts on the device; the converters load only when first used.
 
 **Comment & review**
@@ -93,7 +93,7 @@ The unit tests in `packages/pdf-engine` build real PDFs with MuPDF and inspect w
   - `layout.ts`: generated headers and footers
 - `packages/editor-core`: serializable document model, undoable commands, and the text layout shared by the editor and the exporter
 - `packages/pdf-engine`: MuPDF in a Web Worker
-  - `engine.ts`: rendering, text extraction, export, page assembly, page analysis for conversion, and HTML layout for Office files
+  - `engine.ts`: rendering, text extraction, export, page assembly, page analysis for conversion, HTML layout for Word and Excel files, and slide drawing for PowerPoint files
   - `mupdf.worker.ts`: loads WebAssembly and exposes the engine
 - `docs/adr`: architecture decisions
 

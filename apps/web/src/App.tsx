@@ -169,7 +169,8 @@ const ANNOTATION_LABELS: Record<string, string> = {
   FileAttachment: "Attachment", Caret: "Insertion", Sound: "Sound",
 };
 const annotationLabel = (type: string) => ANNOTATION_LABELS[type] ?? type;
-const OPENABLE = "application/pdf,.pdf,.docx,.xlsx,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+const OPENABLE =
+  "application/pdf,.pdf,.docx,.xlsx,.pptx,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.openxmlformats-officedocument.presentationml.presentation";
 const officeKind = (name: string) => {
   const extension = name.toLowerCase().split(".").pop() ?? "";
   if (["pdf", "docx", "xlsx", "pptx"].includes(extension)) return extension as "pdf" | "docx" | "xlsx" | "pptx";
@@ -467,13 +468,22 @@ export function App() {
   );
 
   /**
-   * PDF bytes for a file: PDFs as they are, Word and Excel files laid out
-   * into pages on this device. The converters load only when needed.
+   * PDF bytes for a file: PDFs as they are, Word, Excel and PowerPoint files
+   * laid out into pages on this device. The converters load only when needed.
    */
   const pdfBytesOf = useCallback(
     async (file: File) => {
       const kind = officeKind(file.name);
       if (kind === "pdf" || (!kind && file.type === "application/pdf")) return file.arrayBuffer();
+      if (kind === "pptx") {
+        setBusy("Converting the presentation…");
+        const slides = await (await import("./convert/fromPptx")).pptxToSlides(new Uint8Array(await file.arrayBuffer()));
+        await withTimeout(engine.current!.ready, 20_000, "The PDF engine took too long to start.");
+        const pdf = await withTimeout(engine.current!.api.slidesToPdf(slides), 120_000, "Drawing the slides took too long.");
+        const copy = new Uint8Array(pdf.byteLength);
+        copy.set(pdf);
+        return copy.buffer;
+      }
       if (kind === "docx" || kind === "xlsx") {
         setBusy(`Converting ${kind === "docx" ? "the Word document" : "the workbook"}…`);
         const bytes = new Uint8Array(await file.arrayBuffer());
@@ -486,10 +496,8 @@ export function App() {
       }
       throw new Error(
         kind === "legacy"
-          ? "Older .doc, .xls and .ppt files can't be opened. Save them as .docx, .xlsx or PDF first."
-          : kind === "pptx"
-            ? "PowerPoint files can't be opened yet. Save the presentation as PDF first."
-            : "Choose a PDF, Word (.docx) or Excel (.xlsx) file.",
+          ? "Older .doc, .xls and .ppt files can't be opened. Save them as .docx, .xlsx, .pptx or PDF first."
+          : "Choose a PDF, Word (.docx), Excel (.xlsx) or PowerPoint (.pptx) file.",
       );
     },
     [],
@@ -500,7 +508,7 @@ export function App() {
       setError("");
       try {
         const bytes = await pdfBytesOf(file);
-        await openBytes({ id: crypto.randomUUID(), name: file.name.replace(/\.(docx|xlsx)$/i, ".pdf"), bytes });
+        await openBytes({ id: crypto.randomUUID(), name: file.name.replace(/\.(docx|xlsx|pptx)$/i, ".pdf"), bytes });
       } catch (cause) {
         fail(cause, "The file could not be opened.");
         setBusy("");
@@ -2156,7 +2164,7 @@ export function App() {
               }}
             />
           </label>
-          <p className="dropcopy">Word and Excel files open as PDFs too. Or drop files anywhere on this page.</p>
+          <p className="dropcopy">Word, Excel and PowerPoint files open as PDFs too. Or drop files anywhere on this page.</p>
           {busy && (
             <p className="busyLine" role="status">
               <span className="spinner" /> {busy}
